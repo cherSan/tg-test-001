@@ -1,0 +1,26 @@
+{
+  "name": "@chbot/chbot-e2e",
+  "version": "0.0.1",
+  "private": true,
+  "nx": {
+    "implicitDependencies": [
+      "@chbot/chbot"
+    ],
+    "targets": {
+      "e2e": {
+        "executor": "@nx/jest:jest",
+        "outputs": [
+          "{projectRoot}/test-output/jest/coverage"
+        ],
+        "dependsOn": [
+          "@chbot/chbot:build",
+          "@chbot/chbot:serve"
+        ],
+        "options": {
+          "jestConfig": "apps/chbot-e2e/jest.config.cts",
+          "passWithNoTests": true
+        }
+      }
+    }
+  }
+}

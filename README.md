@@ -2,6 +2,7 @@
 
 ## Run tasks
 
+### RUN THIS for development
 To run the dev server for your app, use:
 
 ```sh
@@ -19,3 +20,11 @@ To see all available targets to run for a project, run:
 ```sh
 npx nx show project chbot
 ```
+
+### In root:
+Create `.env` file in root directory with:
+```env
+TG_API_KEY="***"
+TG_PAYMENT_TOKEN="***"
+```
+

@@ -2,7 +2,9 @@
   "name": "@chbot/source",
   "version": "0.0.0",
   "license": "MIT",
-  "scripts": {},
+  "scripts": {
+    "run:dev": " nx run @chbot/chbot:build:development"
+  },
   "private": true,
   "dependencies": {
     "@nestjs/common": "^11.0.0",

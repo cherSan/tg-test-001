@@ -64,7 +64,8 @@
         ],
         "options": {
           "buildTarget": "@chbot/chbot:build",
-          "runBuildTargetDependencies": false
+          "runBuildTargetDependencies": false,
+          "debounce": 5000
         },
         "configurations": {
           "development": {

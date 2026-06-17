@@ -11,8 +11,7 @@ export class BotUpdate {
     const username = ctx.from?.first_name || 'пользователь';
     const message = this.botService.getWelcomeMessage(username);
     await ctx.reply(message);
-    await this.botService.mainCommands(ctx);
-    await this.botService.showMenu(ctx);
+    await this.botService.botMenu(ctx);
   }
 
   @Command('menu')
@@ -22,7 +21,12 @@ export class BotUpdate {
 
   @Help()
   async onHelp(@Ctx() ctx: Context) {
-    await ctx.reply('Доступные команды: /menu, /help.');
+    await ctx.reply('Доступные команды: /start, /help. Или просто отправьте текст.');
+  }
+
+  @Hears('id')
+  async onSecretWord(@Ctx() ctx: Context) {
+    await ctx.reply(`Ваш Telegram ID: ${ctx.from?.id}`);
   }
 
   @Action('buy')
@@ -45,22 +49,37 @@ export class BotUpdate {
 
   @Action('get_link')
   async onGetLink(@Ctx() ctx: Context) {
+    await ctx.answerCbQuery();
     await ctx.reply('Вот ваша ссылка.');
   }
 
   @Action('get_qr')
   async onGetQR(@Ctx() ctx: Context) {
+    await ctx.answerCbQuery();
     await ctx.reply('Вот ваш QR-код.');
   }
 
-  @Hears('id')
-  async onSecretWord(@Ctx() ctx: Context) {
-    await ctx.reply(`Ваш Telegram ID: ${ctx.from?.id}`);
+  @On('pre_checkout_query')
+  async onPreCheckoutQuery(@Ctx() ctx: Context) {
+    await this.botService.handlePreCheckoutQuery(ctx);
+  }
+
+  @On('successful_payment')
+  async onSuccessfulPayment(@Ctx() ctx: Context) {
+    if (ctx.message && 'successful_payment' in ctx.message) {
+      const payment = ctx.message.successful_payment;
+      const payload = payment.invoice_payload;
+      const telegramUserId = ctx.from?.id;
+
+      if (telegramUserId) {
+        await this.botService.handleSuccessfulPayment(telegramUserId, payload, ctx);
+      }
+    }
   }
 
   @On('text')
   async onMessage(@Ctx() ctx: Context) {
-    if ('text' in ctx.message!) {
+    if (ctx.message && 'text' in ctx.message) {
       const replyText = this.botService.processText(ctx.message.text);
       await ctx.reply(replyText);
     }

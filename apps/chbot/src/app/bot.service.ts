@@ -1,15 +1,8 @@
-import {Injectable, OnModuleDestroy} from '@nestjs/common';
-import {Context, Markup, Telegraf} from "telegraf";
-import {InjectBot} from "nestjs-telegraf";
+import { Injectable } from '@nestjs/common';
+import {Context, Markup} from "telegraf";
 
 @Injectable()
-export class BotService implements OnModuleDestroy {
-  constructor(
-    @InjectBot() private readonly bot: Telegraf
-  ) {
-    this.setupManualListeners();
-  }
-
+export class BotService {
   getWelcomeMessage(username: string): string {
     return `Привет, ${username}! Рад приветствовать тебя в NestJS боте.`;
   }
@@ -20,7 +13,7 @@ export class BotService implements OnModuleDestroy {
 
   async showMenu(ctx: Context) {
     await ctx.reply(
-      'Главное меню:',
+      'Main menu:',
       Markup.inlineKeyboard([
         [
           Markup.button.url('Читать правила', 'https://telegram.org'),
@@ -30,49 +23,39 @@ export class BotService implements OnModuleDestroy {
           Markup.button.callback('Получить ссылку', 'get_link'),
         ],
         [
-          Markup.button.callback('Получить QR', 'get_qr'),
-        ]
-      ]),
+          Markup.button.callback('Show menu', 'show_menu'),
+        ],
+      ])
     );
   }
 
-  async mainCommands(ctx: Context) {
+  async botMenu(ctx: Context) {
     await ctx.reply(
-      'Команды:',
+      'Main menu:',
       Markup.keyboard([
         [
           '/menu',
           '/help',
+        ],
+        [
+          '/settings'
         ],
       ]).resize()
         .persistent()
     );
   }
 
-  async onModuleDestroy() {
-    await this.disconnectBot('NestJS Module Destroy');
+  async handlePreCheckoutQuery(ctx: Context) {
+    // В будущем здесь можно добавить логику проверки (наличие товара, актуальность цены и т.д.)
+    // Если всё хорошо — подтверждаем (true). Если есть ошибка — передаем false и текст ошибки.
+    await ctx.answerPreCheckoutQuery(true);
   }
 
-  private setupManualListeners() {
-    const signals: NodeJS.Signals[] = ['SIGINT', 'SIGTERM'];
+  async handleSuccessfulPayment(userId: number, payload: string, ctx: Context) {
+    console.log(`Пользователь ${userId} успешно оплатил заказ! Payload: ${payload}`);
+    // Начисляем подписку / выдаем товар в вашей БД...
+    // await this.userService.activateSubscription(userId);
 
-    signals.forEach((signal) => {
-      process.once(signal, async () => {
-        await this.disconnectBot(`Node.js ${signal}`);
-        process.exit(0);
-      });
-    });
-  }
-
-  private async disconnectBot(reason: string) {
-    console.log(`[Telegram Shutdown] Остановка бота по причине: ${reason}...`);
-    try {
-      if (this.bot && typeof this.bot.stop === 'function') {
-        this.bot.stop();
-        console.log('[Telegram Shutdown] Соединение с Telegram успешно закрыто.');
-      }
-    } catch (error) {
-      console.error('[Telegram Shutdown] Ошибка при закрытии бота:', error);
-    }
+    await ctx.reply('🎉 Спасибо за оплату! Ваша подписка успешно активирована.');
   }
 }

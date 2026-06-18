@@ -1,11 +1,13 @@
 import {Update, Start, Help, On, Hears, Ctx, Command, Action, Settings} from 'nestjs-telegraf';
 import {Context} from 'telegraf';
 import { BotService } from './bot.service';
+import {QrCodeService} from "../../qr/qr.service";
 
 @Update()
 export class BotUpdate {
   constructor(
-    private readonly botService: BotService
+    private readonly botService: BotService,
+    private readonly qr: QrCodeService,
   ) {}
 
   @Start()
@@ -63,7 +65,11 @@ export class BotUpdate {
   @Action('get_qr')
   async onGetQR(@Ctx() ctx: Context) {
     await ctx.answerCbQuery();
-    await ctx.reply('Вот ваш QR-код.');
+    const qr = await this.qr.generateQrBuffer('HELLO, TEST CONNECTION');
+    await ctx.reply(
+      'Вот ваш QR-код.',
+    );
+    await ctx.sendPhoto({ source: qr });
   }
 
   @On('pre_checkout_query')

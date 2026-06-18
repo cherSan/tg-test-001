@@ -1,10 +1,12 @@
-import {Update, Start, Help, On, Hears, Ctx, Command, Action} from 'nestjs-telegraf';
+import {Update, Start, Help, On, Hears, Ctx, Command, Action, Settings} from 'nestjs-telegraf';
 import {Context} from 'telegraf';
 import { BotService } from './bot.service';
 
 @Update()
 export class BotUpdate {
-  constructor(private readonly botService: BotService) {}
+  constructor(
+    private readonly botService: BotService
+  ) {}
 
   @Start()
   async onStart(@Ctx() ctx: Context) {
@@ -15,12 +17,17 @@ export class BotUpdate {
   }
 
   @Command('menu')
-  async onShowMenu(@Ctx() ctx: Context) {
+  async menu(@Ctx() ctx: Context) {
     await this.botService.showMenu(ctx);
   }
 
   @Help()
-  async onHelp(@Ctx() ctx: Context) {
+  async help(@Ctx() ctx: Context) {
+    await ctx.reply('Доступные команды: /start, /help. Или просто отправьте текст.');
+  }
+
+  @Settings()
+  async settings(@Ctx() ctx: Context) {
     await ctx.reply('Доступные команды: /start, /help. Или просто отправьте текст.');
   }
 

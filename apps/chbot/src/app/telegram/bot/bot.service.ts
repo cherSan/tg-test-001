@@ -4,7 +4,7 @@ import {Context, Markup} from "telegraf";
 @Injectable()
 export class BotService {
   getWelcomeMessage(username: string): string {
-    return `Привет, ${username}! Рад приветствовать тебя в NestJS боте.`;
+    return `Привет, ${username}! Рад приветствовать тебя!.`;
   }
 
   processText(text: string): string {
@@ -31,13 +31,14 @@ export class BotService {
 
   async botMenu(ctx: Context) {
     await ctx.reply(
-      'Main menu:',
+      'I activate personal commands for you.',
       Markup.keyboard([
         [
+          '/start',
           '/menu',
-          '/help',
         ],
         [
+          '/help',
           '/settings'
         ],
       ]).resize()

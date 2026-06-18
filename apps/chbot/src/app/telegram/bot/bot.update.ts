@@ -2,6 +2,8 @@ import {Update, Start, Help, On, Hears, Ctx, Command, Action, Settings} from 'ne
 import {Context} from 'telegraf';
 import { BotService } from './bot.service';
 import {QrCodeService} from "../../qr/qr.service";
+import {WIZARD_SCENE_ID} from "./test.wizzard";
+import {RND_SCENE_ID} from "./test.scene";
 
 @Update()
 export class BotUpdate {
@@ -70,6 +72,16 @@ export class BotUpdate {
       'Вот ваш QR-код.',
     );
     await ctx.sendPhoto({ source: qr });
+  }
+
+  @Action('wizard_test')
+  async wizardTest(@Ctx() ctx: Context): Promise<void> {
+    await (ctx as any).scene.enter(WIZARD_SCENE_ID);
+  }
+
+  @Action('scene_test')
+  async sceneTest(@Ctx() ctx: Context): Promise<void> {
+    await (ctx as any).scene.enter(RND_SCENE_ID);
   }
 
   @On('pre_checkout_query')

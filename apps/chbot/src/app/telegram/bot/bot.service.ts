@@ -22,10 +22,12 @@ export class BotService {
           Markup.button.callback('Купить', 'buy'),
         ],
         [
+          Markup.button.callback('Получить QR', 'get_qr'),
           Markup.button.callback('Получить ссылку', 'get_link'),
         ],
         [
-          Markup.button.callback('Получить QR', 'get_qr'),
+          Markup.button.callback('Тест визарда', 'wizard_test'),
+          Markup.button.callback('Тест сцены', 'scene_test'),
         ],
         [
           Markup.button.callback('Show menu', 'show_menu'),

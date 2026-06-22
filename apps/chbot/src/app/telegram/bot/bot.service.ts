@@ -2,13 +2,18 @@ import { Injectable } from '@nestjs/common';
 import {Context, Markup} from "telegraf";
 import { UserService } from '../../db/user.service';
 import { User } from '../../db/entities/user.entity';
+import { DepositService } from '../../db/deposit.service';
+import { Deposit } from '../../db/entities/deposit.entity';
 
 @Injectable()
 export class BotService {
   /** Auto-activate users after CAPTCHA (can be toggled in admin settings) */
   autoActivate: boolean = process.env.AUTO_ACTIVATE === 'true';
 
-  constructor(private readonly userService: UserService) {}
+  constructor(
+    private readonly userService: UserService,
+    private readonly depositService: DepositService,
+  ) {}
 
   getWelcomeMessage(username: string): string {
     return `Привет, ${username}! Рад приветствовать тебя!.`;
@@ -55,6 +60,7 @@ export class BotService {
     if (isAdmin) {
       buttons.push([Markup.button.callback('👥 Пользователи', 'seeusers')]);
       buttons.push([Markup.button.callback('⏳ Ожидают активации', 'pending_users')]);
+      buttons.push([Markup.button.callback('💳 Ожидают пополнения', 'pending_deposits')]);
       buttons.push([Markup.button.callback('📝 Редактировать пользователей', 'edit_users')]);
       buttons.push([Markup.button.callback('⚙️ Настройки', 'admin_settings')]);
     }
@@ -339,9 +345,15 @@ export class BotService {
       `💵 USDT: \`${usdtAddr}\`\n` +
       `₿  BTC: \`${btcAddr}\`\n` +
       `💎 GRAM: \`${gramAddr}\`\n\n` +
-      `После отправки средств баланс будет зачислен автоматически.`;
+      `После отправки средств нажмите «✅ Я оплатил» для зачисления.`;
 
-    await ctx.reply(message, { parse_mode: 'Markdown' });
+    await ctx.reply(message, {
+      parse_mode: 'Markdown',
+      ...Markup.inlineKeyboard([
+        [Markup.button.callback('✅ Я оплатил', 'i_paid')],
+        [Markup.button.callback('🔙 Назад', 'show_menu')],
+      ]),
+    });
   }
 
   /** Show users awaiting activation (admin only) */
@@ -424,6 +436,129 @@ export class BotService {
       parse_mode: 'Markdown',
       ...Markup.inlineKeyboard(buttons),
     });
+  }
+
+  // ─── Deposit / Payment verification ─────────────────────
+
+  /** Ask user to select currency for deposit */
+  async showDepositCurrencySelect(ctx: Context) {
+    await ctx.reply(
+      '✅ **Я оплатил**\n\nВыберите валюту пополнения:',
+      {
+        parse_mode: 'Markdown',
+        ...Markup.inlineKeyboard([
+          [
+            Markup.button.callback('₿ BTC', 'dep_currency_BTC'),
+            Markup.button.callback('💵 USDT', 'dep_currency_USDT'),
+            Markup.button.callback('💎 GRAM', 'dep_currency_GRAM'),
+          ],
+          [Markup.button.callback('🔙 Отмена', 'show_menu')],
+        ]),
+      },
+    );
+  }
+
+  /** Prompt user to enter TxID and amount */
+  async showTxIdPrompt(ctx: Context, currency: string) {
+    await ctx.reply(
+      `📝 Введите **TxID** транзакции и **сумму** через пробел:\n\n` +
+      `Пример: \`abc123def456... 0.005\`\n\n` +
+      `Валюта: **${currency}**\n` +
+      `(отправьте /cancel для отмены)`,
+      { parse_mode: 'Markdown' },
+    );
+  }
+
+  /** Verify BTC transaction against blockchain */
+  async verifyBtcDeposit(txId: string, expectedAmount: number): Promise<{
+    success: boolean;
+    verifiedAmount?: number;
+    error?: string;
+  }> {
+    const btcAddr = process.env.BTC_PAYMENT_ADDRESS || '';
+
+    // Try mempool.space first
+    try {
+      const res = await fetch(`https://mempool.space/api/tx/${txId}`);
+      if (!res.ok) {
+        return { success: false, error: 'Транзакция не найдена в блокчейне.' };
+      }
+      const tx = await res.json() as any;
+      if (!tx.status?.confirmed) {
+        return { success: false, error: 'Транзакция ещё не подтверждена. Попробуйте позже.' };
+      }
+
+      let totalToUs = 0;
+      for (const out of tx.vout || []) {
+        if (out.scriptpubkey_address === btcAddr) {
+          totalToUs += out.value / 100_000_000; // satoshi → BTC
+        }
+      }
+
+      if (totalToUs === 0) {
+        return { success: false, error: `Адрес получателя не совпадает с BTC_PAYMENT_ADDRESS.` };
+      }
+
+      if (Math.abs(totalToUs - expectedAmount) > 0.0001) {
+        return {
+          success: false,
+          error: `Сумма не совпадает. Ожидалось: ${expectedAmount} BTC, найдено: ${totalToUs.toFixed(8)} BTC.`,
+        };
+      }
+
+      return { success: true, verifiedAmount: totalToUs };
+    } catch {
+      return { success: false, error: 'Не удалось проверить транзакцию. Попробуйте позже.' };
+    }
+  }
+
+  /** Show deposit history to user */
+  async showMyDeposits(ctx: Context, deposits: Deposit[]) {
+    if (deposits.length === 0) {
+      await ctx.reply('📭 У вас пока нет пополнений.');
+      return;
+    }
+
+    const lines = deposits.map((d) => {
+      const statusIcon = d.status === 'confirmed' ? '✅' : d.status === 'rejected' ? '❌' : '⏳';
+      return `${statusIcon} **${d.currency}** ${d.amount} | Tx: \`${d.txId.slice(0, 16)}...\` | ${d.createdAt.toISOString().replace('T', ' ').slice(0, 19)}`;
+    });
+
+    await ctx.reply(
+      `📋 **История пополнений**\n\n${lines.join('\n\n')}`,
+      { parse_mode: 'Markdown' },
+    );
+  }
+
+  /** Admin: show pending deposits */
+  async showPendingDeposits(ctx: Context) {
+    const deposits = await this.depositService.findPending();
+
+    if (deposits.length === 0) {
+      await ctx.reply('✅ Нет ожидающих пополнений.');
+      return;
+    }
+
+    for (const d of deposits) {
+      const user = await this.userService.findById(d.userId);
+      const name = user?.firstName || user?.username || `ID ${d.userId}`;
+      const message =
+        `💳 **Пополнение #${d.id}**\n` +
+        `👤 ${name}\n` +
+        `💰 ${d.amount} ${d.currency}\n` +
+        `🔗 TxID: \`${d.txId}\`\n` +
+        `📅 ${d.createdAt.toISOString().replace('T', ' ').slice(0, 19)}`;
+
+      await ctx.reply(message, {
+        parse_mode: 'Markdown',
+        ...Markup.inlineKeyboard([
+          [
+            Markup.button.callback('✅ Подтвердить', `confdep_${d.id}`),
+            Markup.button.callback('❌ Отклонить', `rejdep_${d.id}`),
+          ],
+        ]),
+      });
+    }
   }
 
   async handlePreCheckoutQuery(ctx: Context) {

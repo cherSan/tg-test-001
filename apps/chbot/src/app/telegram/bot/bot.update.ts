@@ -3,6 +3,7 @@ import {Context, Markup} from 'telegraf';
 import { BotService } from './bot.service';
 import {QrCodeService} from "../../qr/qr.service";
 import {UserService} from "../../db/user.service";
+import {DepositService} from "../../db/deposit.service";
 import {User} from "../../db/entities/user.entity";
 import {WIZARD_SCENE_ID} from "./test.wizzard";
 import {RND_SCENE_ID} from "./test.scene";
@@ -23,6 +24,10 @@ interface SessionData {
     answer: number;
     user: User;
   };
+  depositFlow?: {
+    step: 'currency' | 'txid';
+    currency?: string;
+  };
 }
 
 @Update()
@@ -31,6 +36,7 @@ export class BotUpdate {
     private readonly botService: BotService,
     private readonly qr: QrCodeService,
     private readonly userService: UserService,
+    private readonly depositService: DepositService,
   ) {}
 
   @Start()
@@ -374,6 +380,67 @@ export class BotUpdate {
     await this.botService.showBuySubscription(ctx);
   }
 
+  // ─── Deposit flow ──────────────────────────────────────────
+
+  @Action('i_paid')
+  async onIPaid(@Ctx() ctx: Context & { session: SessionData }) {
+    await ctx.answerCbQuery();
+    if (!(await this.checkActive(ctx))) return;
+
+    ctx.session.depositFlow = { step: 'currency' };
+    await this.botService.showDepositCurrencySelect(ctx);
+  }
+
+  @Action(/^dep_currency_(BTC|USDT|GRAM)$/)
+  async onDepositCurrency(@Ctx() ctx: Context & { session: SessionData }) {
+    await ctx.answerCbQuery();
+    if (!(await this.checkActive(ctx))) return;
+
+    const match = (ctx as any).match;
+    const currency = match[1];
+    ctx.session.depositFlow = { step: 'txid', currency };
+    await this.botService.showTxIdPrompt(ctx, currency);
+  }
+
+  // ─── Admin pending deposits ────────────────────────────────
+
+  @Action('pending_deposits')
+  async onPendingDeposits(@Ctx() ctx: Context) {
+    await ctx.answerCbQuery();
+    if (!this.checkAdmin(ctx)) return;
+    await this.botService.showPendingDeposits(ctx);
+  }
+
+  @Action(/^confdep_(\d+)$/)
+  async onConfirmDeposit(@Ctx() ctx: Context) {
+    await ctx.answerCbQuery();
+    if (!this.checkAdmin(ctx)) return;
+
+    const match = (ctx as any).match;
+    const depositId = parseInt(match[1], 10);
+    try {
+      await this.depositService.confirm(depositId);
+      await ctx.reply('✅ Пополнение подтверждено, баланс зачислен.');
+    } catch {
+      await ctx.reply('❌ Ошибка: пополнение не найдено.');
+    }
+  }
+
+  @Action(/^rejdep_(\d+)$/)
+  async onRejectDeposit(@Ctx() ctx: Context) {
+    await ctx.answerCbQuery();
+    if (!this.checkAdmin(ctx)) return;
+
+    const match = (ctx as any).match;
+    const depositId = parseInt(match[1], 10);
+    try {
+      await this.depositService.reject(depositId, 'Отклонено администратором');
+      await ctx.reply('❌ Пополнение отклонено.');
+    } catch {
+      await ctx.reply('❌ Ошибка: пополнение не найдено.');
+    }
+  }
+
   @Action('get_link')
   async onGetLink(@Ctx() ctx: Context) {
     await ctx.answerCbQuery();
@@ -661,6 +728,19 @@ export class BotUpdate {
         return;
       }
 
+      // ── /cancel during deposit flow ────────────────────────
+      if (text === '/cancel' && ctx.session?.depositFlow) {
+        ctx.session.depositFlow = undefined;
+        await ctx.reply('❌ Пополнение отменено.');
+        return;
+      }
+
+      // ── Deposit TxID input ──────────────────────────────────
+      if (ctx.session?.depositFlow?.step === 'txid') {
+        await this.handleDepositTxId(ctx, text);
+        return;
+      }
+
       // ── Inactive user guard ────────────────────────────────
       if (!(await this.checkActive(ctx))) return;
 
@@ -768,6 +848,97 @@ export class BotUpdate {
 
     const message = `📋 **Список пользователей** (${users.length}):\n\n${lines.join('\n\n')}`;
     await ctx.reply(message, { parse_mode: 'Markdown' });
+  }
+
+  /** Process deposit TxID + amount input */
+  private async handleDepositTxId(ctx: Context & { session: SessionData }, text: string) {
+    const tgUser = ctx.from!;
+    const currency = ctx.session.depositFlow!.currency!;
+
+    // Parse: "<txId> <amount>"
+    const parts = text.trim().split(/\s+/);
+    if (parts.length < 2) {
+      await ctx.reply('❌ Неверный формат. Введите TxID и сумму через пробел.\nПример: `abc123... 0.005`');
+      return;
+    }
+
+    const txId = parts[0];
+    const amount = parseFloat(parts[1]);
+
+    if (isNaN(amount) || amount <= 0) {
+      await ctx.reply('❌ Сумма должна быть положительным числом. Попробуйте снова.');
+      return;
+    }
+
+    // Check duplicate TxID
+    const existing = await this.depositService.findByTxId(txId);
+    if (existing) {
+      ctx.session.depositFlow = undefined;
+      await ctx.reply('❌ Эта транзакция уже была использована.');
+      return;
+    }
+
+    // For BTC: verify against blockchain
+    if (currency === 'BTC') {
+      await ctx.reply('🔍 Проверяю транзакцию в блокчейне...');
+      const result = await this.botService.verifyBtcDeposit(txId, amount);
+
+      if (!result.success) {
+        ctx.session.depositFlow = undefined;
+        await ctx.reply(`❌ ${result.error}`);
+        return;
+      }
+
+      // Auto-confirm BTC deposit
+      ctx.session.depositFlow = undefined;
+      const dbUser = await this.userService.findByTelegramId(tgUser.id);
+      await this.depositService.create({
+        userId: dbUser!.id,
+        txId,
+        currency,
+        amount,
+        verifiedAmount: result.verifiedAmount,
+        status: 'confirmed',
+      });
+      await this.userService.creditBalance(dbUser!.id, currency, result.verifiedAmount!);
+      await ctx.reply(
+        `✅ Пополнение подтверждено!\n` +
+        `+**${result.verifiedAmount!.toFixed(8)} BTC** зачислено на баланс.`,
+        { parse_mode: 'Markdown' },
+      );
+      return;
+    }
+
+    // For USDT/GRAM: store as pending for admin review
+    ctx.session.depositFlow = undefined;
+    const dbUser = await this.userService.findByTelegramId(tgUser.id);
+    await this.depositService.create({
+      userId: dbUser!.id,
+      txId,
+      currency,
+      amount,
+      status: 'pending',
+    });
+
+    await ctx.reply(
+      `⏳ Пополнение **${amount} ${currency}** отправлено на проверку администратору.\n` +
+      `TxID: \`${txId}\`\n\n` +
+      `Баланс будет зачислен после подтверждения.`,
+      { parse_mode: 'Markdown' },
+    );
+
+    // Notify admins
+    const admins = await this.userService.findAllAdmins();
+    const name = dbUser!.firstName || dbUser!.username || `ID ${dbUser!.telegramId}`;
+    for (const admin of admins) {
+      try {
+        await ctx.telegram.sendMessage(
+          admin.telegramId,
+          `💳 **Новое пополнение**\n👤 ${name}\n💰 ${amount} ${currency}\n🔗 \`${txId}\``,
+          { parse_mode: 'Markdown' },
+        );
+      } catch (_) {}
+    }
   }
 
   /** Process edit field text input */

@@ -1,7 +1,9 @@
 import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { User } from './entities/user.entity';
+import { Deposit } from './entities/deposit.entity';
 import { UserService } from './user.service';
+import { DepositService } from './deposit.service';
 
 @Module({
   imports: [
@@ -14,9 +16,9 @@ import { UserService } from './user.service';
         synchronize: true, // TODO: disable in production
       }),
     }),
-    TypeOrmModule.forFeature([User]),
+    TypeOrmModule.forFeature([User, Deposit]),
   ],
-  providers: [UserService],
-  exports: [TypeOrmModule, UserService],
+  providers: [UserService, DepositService],
+  exports: [TypeOrmModule, UserService, DepositService],
 })
 export class DBModule {}

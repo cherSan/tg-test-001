@@ -88,6 +88,16 @@ export class UserService {
     await this.userRepo.delete(userId);
   }
 
+  /** Add funds to user's balance for a specific currency */
+  async creditBalance(userId: number, currency: string, amount: number): Promise<User> {
+    const field = currency === 'BTC' ? 'userBalanceBTC' as const
+      : currency === 'GRAM' ? 'userBalanceGram' as const
+      : 'userBalanceUSDT' as const;
+    const user = await this.findById(userId);
+    const newAmount = (user?.[field] || 0) + amount;
+    return this.update(userId, { [field]: newAmount });
+  }
+
   async findByAuthToken(token: string): Promise<User | null> {
     return this.userRepo.findOne({ where: { authToken: token } });
   }

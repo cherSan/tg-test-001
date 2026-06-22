@@ -180,4 +180,39 @@ export class BotUpdate {
       await ctx.reply(replyText);
     }
   }
+
+  /** Admin-only: list all users */
+  @Command('seeusers')
+  async onSeeUsers(@Ctx() ctx: Context) {
+    const tgUser = ctx.from;
+    if (!tgUser) {
+      await ctx.reply('Не удалось определить пользователя.');
+      return;
+    }
+
+    if (!this.userService.isAdmin(tgUser.id)) {
+      await ctx.reply('⛔ Эта команда доступна только администраторам.');
+      return;
+    }
+
+    const users = await this.userService.findAll();
+
+    if (users.length === 0) {
+      await ctx.reply('📭 В базе пока нет пользователей.');
+      return;
+    }
+
+    const lines = users.map((u, i) => {
+      const role = u.role === 'admin' ? '👑' : '👤';
+      const name = u.firstName || '—';
+      const username = u.username ? `@${u.username}` : '—';
+      const lang = u.languageCode || '—';
+      const premium = u.isPremium ? '⭐' : '';
+      const created = u.createdAt?.toISOString().replace('T', ' ').slice(0, 19) || '—';
+      return `${i + 1}. ${role}${premium} **${name}** (${username})\n   ID: \`${u.telegramId}\` | ${lang} | ${created}`;
+    });
+
+    const message = `📋 **Список пользователей** (${users.length}):\n\n${lines.join('\n\n')}`;
+    await ctx.reply(message, { parse_mode: 'Markdown' });
+  }
 }

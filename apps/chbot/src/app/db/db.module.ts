@@ -7,8 +7,9 @@ import { UserService } from './user.service';
   imports: [
     TypeOrmModule.forRootAsync({
       useFactory: () => ({
-        type: 'better-sqlite3',
-        database: process.env.DB_PATH || 'data/chbot.db',
+        type: 'sqljs',
+        location: process.env.DB_PATH || 'data/chbot.db',
+        autoSave: true,
         autoLoadEntities: true,
         synchronize: true, // TODO: disable in production
       }),

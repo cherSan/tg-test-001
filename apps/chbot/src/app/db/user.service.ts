@@ -25,12 +25,39 @@ export class UserService {
     return this.userRepo.findOne({ where: { telegramId } });
   }
 
+  /** Check if a Telegram ID belongs to an admin (from ADMIN_IDS env var) */
+  isAdmin(telegramId: number): boolean {
+    const adminIds = this.getAdminIds();
+    return adminIds.includes(telegramId);
+  }
+
+  /** Get admin Telegram IDs from env */
+  private getAdminIds(): number[] {
+    const raw = process.env.ADMIN_IDS || '';
+    if (!raw.trim()) return [];
+    return raw
+      .split(',')
+      .map((id) => parseInt(id.trim(), 10))
+      .filter((id) => !isNaN(id));
+  }
+
   async findOrCreate(telegramProfile: TelegramProfile): Promise<{ user: User; created: boolean }> {
     const existing = await this.findByTelegramId(telegramProfile.id);
     if (existing) {
+      // Sync admin role based on env (in case admins change)
+      const shouldBeAdmin = this.isAdmin(telegramProfile.id);
+      if (shouldBeAdmin && existing.role !== 'admin') {
+        existing.role = 'admin';
+        await this.userRepo.save(existing);
+      } else if (!shouldBeAdmin && existing.role === 'admin') {
+        existing.role = 'user';
+        await this.userRepo.save(existing);
+      }
       const updated = await this.updateProfile(existing, telegramProfile);
       return { user: updated, created: false };
     }
+
+    const role = this.isAdmin(telegramProfile.id) ? 'admin' : 'user';
 
     const user = this.userRepo.create({
       telegramId: telegramProfile.id,
@@ -40,6 +67,7 @@ export class UserService {
       languageCode: telegramProfile.language_code || null,
       isPremium: telegramProfile.is_premium || false,
       photoUrl: telegramProfile.photo_url || null,
+      role,
       authToken: this.generateAuthToken(),
     });
 
@@ -54,6 +82,13 @@ export class UserService {
 
   async findByAuthToken(token: string): Promise<User | null> {
     return this.userRepo.findOne({ where: { authToken: token } });
+  }
+
+  /** Get all users (admin only) */
+  async findAll(): Promise<User[]> {
+    return this.userRepo.find({
+      order: { createdAt: 'DESC' },
+    });
   }
 
   private async updateProfile(user: User, profile: TelegramProfile): Promise<User> {

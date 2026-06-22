@@ -1,8 +1,11 @@
 import { Injectable } from '@nestjs/common';
 import {Context, Markup} from "telegraf";
+import { UserService } from '../../db/user.service';
 
 @Injectable()
 export class BotService {
+  constructor(private readonly userService: UserService) {}
+
   getWelcomeMessage(username: string): string {
     return `Привет, ${username}! Рад приветствовать тебя!.`;
   }
@@ -37,19 +40,22 @@ export class BotService {
   }
 
   async botMenu(ctx: Context) {
+    const tgUser = ctx.from;
+    const isAdmin = tgUser ? this.userService.isAdmin(tgUser.id) : false;
+
+    const buttons: any[][] = [
+      ['/start', '/menu'],
+      ['/help', '/settings'],
+    ];
+
+    // Add "Пользователи" button for admins
+    if (isAdmin) {
+      buttons.push(['/seeusers']);
+    }
+
     await ctx.reply(
       'I activate personal commands for you.',
-      Markup.keyboard([
-        [
-          '/start',
-          '/menu',
-        ],
-        [
-          '/help',
-          '/settings'
-        ],
-      ]).resize()
-        .persistent()
+      Markup.keyboard(buttons).resize().persistent(),
     );
   }
 

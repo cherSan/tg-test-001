@@ -37,6 +37,10 @@ export class User {
   @Column({ type: 'varchar', length: 64, nullable: true })
   authToken?: string | null;
 
+  /** User role: 'user' or 'admin' */
+  @Column({ type: 'varchar', length: 16, default: 'user' })
+  role!: string;
+
   @CreateDateColumn()
   createdAt!: Date;
 

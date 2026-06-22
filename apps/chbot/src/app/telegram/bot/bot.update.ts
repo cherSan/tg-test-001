@@ -1,8 +1,9 @@
 import {Update, Start, Help, On, Hears, Ctx, Command, Action, Settings} from 'nestjs-telegraf';
-import {Context} from 'telegraf';
+import {Context, Markup} from 'telegraf';
 import { BotService } from './bot.service';
 import {QrCodeService} from "../../qr/qr.service";
 import {UserService} from "../../db/user.service";
+import {User} from "../../db/entities/user.entity";
 import {WIZARD_SCENE_ID} from "./test.wizzard";
 import {RND_SCENE_ID} from "./test.scene";
 
@@ -13,6 +14,14 @@ interface SessionData {
     firstName: string;
     username: string | null;
     authToken: string;
+  };
+  awaitingEditField?: {
+    userId: number;
+    field: string;
+  };
+  captchaPending?: {
+    answer: number;
+    user: User;
   };
 }
 
@@ -25,14 +34,13 @@ export class BotUpdate {
   ) {}
 
   @Start()
-  async onStart(@Ctx() ctx: Context) {
+  async onStart(@Ctx() ctx: Context & { session: SessionData }) {
     const tgUser = ctx.from;
     if (!tgUser) {
       await ctx.reply('Не удалось получить данные пользователя Telegram.');
       return;
     }
 
-    // Find or create user in database
     const { user, created } = await this.userService.findOrCreate({
       id: tgUser.id,
       first_name: tgUser.first_name,
@@ -42,31 +50,230 @@ export class BotUpdate {
       is_premium: tgUser.is_premium,
     });
 
-    const status = created ? '✅ Вы зарегистрированы в системе.' : '👋 С возвращением!';
+    // Blocked user — reject immediately
+    if (user.userIsBlocked) {
+      await this.botService.sendBlockedMessage(ctx);
+      return;
+    }
+
+    // New user — show CAPTCHA, then activation
+    if (created) {
+      const name = user.firstName || tgUser.first_name || 'пользователь';
+      await ctx.reply(
+        `Привет, ${name}! Рад приветствовать тебя!\n\n` +
+        `Перед отправкой запроса администратору, докажи что ты не бот 🤖`,
+      );
+      await this.sendCaptcha(ctx, user);
+      return;
+    }
+
+    // Existing user but not active — only auto-activate admins
+    if (!user.userIsActive) {
+      if (this.userService.isAdmin(user.telegramId)) {
+        await this.userService.update(user.id, { userIsActive: true });
+        const username = user.firstName || tgUser.first_name || 'пользователь';
+        const message = this.botService.getWelcomeMessage(username);
+        await ctx.reply(`${message} ✅ Ваш аккаунт автоматически активирован (админ).`);
+        await this.botService.botMenu(ctx);
+        return;
+      }
+      const name = user.firstName || tgUser.first_name || 'пользователь';
+      await ctx.reply(
+        `Привет, ${name}!\n\n` +
+        `⏳ Ваш аккаунт всё ещё ожидает активации администратором. ` +
+        `Пожалуйста, подождите — мы уведомим вас, когда доступ будет открыт.`,
+      );
+      return;
+    }
+
+    // Active user — normal flow
     const username = user.firstName || tgUser.first_name || 'пользователь';
     const message = this.botService.getWelcomeMessage(username);
-
-    await ctx.reply(`${message} ${status}`);
+    await ctx.reply(`${message} 👋 С возвращением!`);
     await this.botService.botMenu(ctx);
   }
 
+  // ─── CAPTCHA handlers ──────────────────────────────────────
+
+  @Action(/^captcha_(\-?\d+)$/)
+  async onCaptchaAnswer(@Ctx() ctx: Context & { session: SessionData }) {
+    await ctx.answerCbQuery();
+
+    const pending = ctx.session?.captchaPending;
+    if (!pending) {
+      await ctx.reply('⌛ Капча устарела. Отправьте /start чтобы начать заново.');
+      return;
+    }
+
+    const match = (ctx as any).match;
+    const userAnswer = parseInt(match[1], 10);
+
+    if (userAnswer === pending.answer) {
+      ctx.session.captchaPending = undefined;
+      const user = pending.user;
+
+      // Auto-activate if enabled in admin settings
+      if (this.botService.autoActivate) {
+        await this.userService.update(user.id, { userIsActive: true });
+        await ctx.reply(
+          `✅ Верно! Ты человек.\n\n` +
+          `🎉 Ваш аккаунт активирован автоматически! Отправьте /start для начала работы.`,
+        );
+        await this.botService.sendActivationNotificationToUser(ctx, user.telegramId);
+      } else {
+        await ctx.reply(
+          `✅ Верно! Ты человек.\n\n` +
+          `⏳ Ваш аккаунт ожидает активации администратором. ` +
+          `Пожалуйста, подождите — мы уведомим вас, когда доступ будет открыт.`,
+        );
+        await this.botService.notifyAdminsAboutNewUser(ctx, user);
+      }
+    } else {
+      await ctx.reply('❌ Неверно. Попробуй ещё раз:');
+      await this.sendCaptcha(ctx, pending.user);
+    }
+  }
+
+  // ─── Admin Settings handlers ───────────────────────────────
+
+  @Action('admin_settings')
+  async onAdminSettings(@Ctx() ctx: Context) {
+    await ctx.answerCbQuery();
+    if (!this.checkAdmin(ctx)) return;
+    await this.botService.showAdminSettings(ctx);
+  }
+
+  @Action('autoact_on')
+  async onAutoActOn(@Ctx() ctx: Context) {
+    await ctx.answerCbQuery();
+    if (!this.checkAdmin(ctx)) return;
+    this.botService.autoActivate = true;
+    await ctx.reply('🟢 Автоактивация **включена**.', { parse_mode: 'Markdown' });
+    await this.botService.showAdminSettings(ctx);
+  }
+
+  @Action('autoact_off')
+  async onAutoActOff(@Ctx() ctx: Context) {
+    await ctx.answerCbQuery();
+    if (!this.checkAdmin(ctx)) return;
+    this.botService.autoActivate = false;
+    await ctx.reply('🔴 Автоактивация **выключена**.', { parse_mode: 'Markdown' });
+    await this.botService.showAdminSettings(ctx);
+  }
+
+  // ─── Show menu callback (back button) ──────────────────────
+
+  @Action('show_menu')
+  async onShowMenu(@Ctx() ctx: Context) {
+    await ctx.answerCbQuery();
+    await this.botService.showMenu(ctx);
+  }
+
+  // ─── Notification actions (block / delete from notify) ─────
+
+  /** Block user from admin notification */
+  @Action(/^block_(\d+)$/)
+  async onBlockUser(@Ctx() ctx: Context) {
+    await ctx.answerCbQuery();
+    if (!this.checkAdmin(ctx)) return;
+
+    const match = (ctx as any).match;
+    const telegramId = parseInt(match[1], 10);
+    const user = await this.userService.findByTelegramId(telegramId);
+
+    if (!user) {
+      await ctx.reply('❌ Пользователь не найден.');
+      return;
+    }
+
+    if (user.userIsBlocked) {
+      await ctx.reply('ℹ️ Пользователь уже заблокирован.');
+      return;
+    }
+
+    await this.userService.update(user.id, { userIsBlocked: true });
+    const name = user.firstName || user.username || `ID ${telegramId}`;
+    await ctx.reply(
+      `🚫 Пользователь **${name}** заблокирован.`,
+      { parse_mode: 'Markdown' },
+    );
+  }
+
+  /** Unblock user from edit screen */
+  @Action(/^unblock_(\d+)$/)
+  async onUnblockUser(@Ctx() ctx: Context) {
+    await ctx.answerCbQuery();
+    if (!this.checkAdmin(ctx)) return;
+
+    const match = (ctx as any).match;
+    const telegramId = parseInt(match[1], 10);
+    const user = await this.userService.findByTelegramId(telegramId);
+
+    if (!user) {
+      await ctx.reply('❌ Пользователь не найден.');
+      return;
+    }
+
+    await this.userService.update(user.id, { userIsBlocked: false });
+    const name = user.firstName || user.username || `ID ${telegramId}`;
+    await ctx.reply(`🔓 Пользователь **${name}** разблокирован.`, { parse_mode: 'Markdown' });
+    await this.botService.showUserEditFields(ctx, (await this.userService.findByTelegramId(telegramId))!);
+  }
+
+  /** Delete user from admin notification (with confirmation) */
+  @Action(/^delnotify_(\d+)$/)
+  async onDeleteFromNotify(@Ctx() ctx: Context) {
+    await ctx.answerCbQuery();
+    if (!this.checkAdmin(ctx)) return;
+
+    const match = (ctx as any).match;
+    const telegramId = parseInt(match[1], 10);
+    const user = await this.userService.findByTelegramId(telegramId);
+
+    if (!user) {
+      await ctx.reply('❌ Пользователь не найден.');
+      return;
+    }
+
+    const name = user.firstName || user.username || `ID ${telegramId}`;
+    await ctx.reply(
+      `⚠️ **Удалить пользователя?**\n\n${name}\nTelegram ID: \`${telegramId}\`\n\nЭто действие необратимо!`,
+      {
+        parse_mode: 'Markdown',
+        ...Markup.inlineKeyboard([
+          [
+            Markup.button.callback('✅ Да, удалить', `delyes_${user.id}`),
+            Markup.button.callback('❌ Нет', 'edit_users'),
+          ],
+        ]),
+      },
+    );
+  }
+
+  // ─── Text handler ────────────────────────────────────────────
+
   @Command('menu')
   async menu(@Ctx() ctx: Context & { session: SessionData }) {
+    if (!(await this.checkActive(ctx))) return;
     await this.botService.showMenu(ctx);
   }
 
   @Help()
   async help(@Ctx() ctx: Context) {
+    if (!(await this.checkActive(ctx))) return;
     await ctx.reply('Доступные команды: /start, /help. Или просто отправьте текст.');
   }
 
   @Settings()
   async settings(@Ctx() ctx: Context) {
+    if (!(await this.checkActive(ctx))) return;
     await ctx.reply('Доступные команды: /start, /help. Или просто отправьте текст.');
   }
 
   @Hears('whoami')
   async onWhoAmI(@Ctx() ctx: Context & { session: SessionData }) {
+    if (!(await this.checkActive(ctx))) return;
+
     const sessionUser = ctx.session?.user;
 
     if (!sessionUser) {
@@ -83,7 +290,9 @@ export class BotUpdate {
         `Имя: ${dbUser?.firstName || '—'}\n` +
         `Username: ${dbUser?.username ? '@' + dbUser.username : '—'}\n` +
         `Premium: ${dbUser?.isPremium ? '✅' : '❌'}\n` +
-        `Язык: ${dbUser?.languageCode || '—'}\n` +
+        `Роль: ${dbUser?.role || '—'}\n` +
+        `Баланс: ${dbUser?.userBalanceUSDT} USDT / ${dbUser?.userBalanceBTC} BTC\n` +
+        `Статус: ${dbUser?.userIsActive ? '✅ Активен' : '⏳ Ожидает активации'}\n` +
         `Создан: ${dbUser?.createdAt?.toISOString() || '—'}\n` +
         `\n🔑 Auth token: \`${dbUser?.authToken?.slice(0, 16)}...\``,
       { parse_mode: 'Markdown' },
@@ -92,11 +301,13 @@ export class BotUpdate {
 
   @Hears('id')
   async onSecretWord(@Ctx() ctx: Context) {
+    if (!(await this.checkActive(ctx))) return;
     await ctx.reply(`Ваш Telegram ID: ${ctx.from?.id}`);
   }
 
   @Hears('what?')
   async onWhat(@Ctx() ctx: Context) {
+    if (!(await this.checkActive(ctx))) return;
     try {
       const data = await fetch('http://127.0.0.1:13544/api/ui-traffic-stats', {
         method: 'GET',
@@ -113,7 +324,9 @@ export class BotUpdate {
 
   @Action('buy')
   async onBuy(@Ctx() ctx: Context) {
-    await ctx.answerCbQuery('Гоните монетку', { show_alert: true });
+    await ctx.answerCbQuery();
+    if (!(await this.checkActive(ctx))) return;
+
     await ctx.reply('Вы выбрали покупку.');
 
     await ctx.replyWithInvoice({
@@ -132,26 +345,30 @@ export class BotUpdate {
   @Action('get_link')
   async onGetLink(@Ctx() ctx: Context) {
     await ctx.answerCbQuery();
+    if (!(await this.checkActive(ctx))) return;
     await ctx.reply('Вот ваша ссылка.');
   }
 
   @Action('get_qr')
   async onGetQR(@Ctx() ctx: Context) {
     await ctx.answerCbQuery();
+    if (!(await this.checkActive(ctx))) return;
     const qr = await this.qr.generateQrBuffer('HELLO, TEST CONNECTION');
-    await ctx.reply(
-      'Вот ваш QR-код.',
-    );
+    await ctx.reply('Вот ваш QR-код.');
     await ctx.sendPhoto({ source: qr });
   }
 
   @Action('wizard_test')
   async wizardTest(@Ctx() ctx: Context): Promise<void> {
+    await ctx.answerCbQuery();
+    if (!(await this.checkActive(ctx))) return;
     await (ctx as any).scene.enter(WIZARD_SCENE_ID);
   }
 
   @Action('scene_test')
   async sceneTest(@Ctx() ctx: Context): Promise<void> {
+    await ctx.answerCbQuery();
+    if (!(await this.checkActive(ctx))) return;
     await (ctx as any).scene.enter(RND_SCENE_ID);
   }
 
@@ -173,17 +390,286 @@ export class BotUpdate {
     }
   }
 
+  // ─── Activation via inline button ────────────────────────────
+
+  @Action(/^activate_(\d+)$/)
+  async onActivateUser(@Ctx() ctx: Context) {
+    await ctx.answerCbQuery();
+    await this.handleActivateUser(ctx);
+  }
+
+  /** Show users awaiting activation (admin) */
+  @Action('pending_users')
+  async onPendingUsers(@Ctx() ctx: Context) {
+    await ctx.answerCbQuery();
+    if (!this.checkAdmin(ctx)) return;
+    await this.botService.showPendingUsers(ctx);
+  }
+
+  // ─── Edit Users actions ──────────────────────────────────────
+
+  @Action('edit_users')
+  async onEditUsers(@Ctx() ctx: Context) {
+    await ctx.answerCbQuery();
+    if (!this.checkAdmin(ctx)) return;
+    await this.botService.showEditUsersList(ctx);
+  }
+
+  @Action(/^edit_user_(\d+)$/)
+  async onEditUser(@Ctx() ctx: Context) {
+    await ctx.answerCbQuery();
+    if (!this.checkAdmin(ctx)) return;
+
+    const match = (ctx as any).match;
+    const telegramId = parseInt(match[1], 10);
+    const user = await this.userService.findByTelegramId(telegramId);
+
+    if (!user) {
+      await ctx.reply('❌ Пользователь не найден.');
+      return;
+    }
+
+    await this.botService.showUserEditFields(ctx, user);
+  }
+
+  @Action(/^ef_(\w+)_(\d+)$/)
+  async onEditField(@Ctx() ctx: Context & { session: SessionData }) {
+    await ctx.answerCbQuery();
+    if (!this.checkAdmin(ctx)) return;
+
+    const match = (ctx as any).match;
+    const field = match[1];
+    const userId = parseInt(match[2], 10);
+
+    const validFields = ['firstName', 'username', 'userBalanceUSDT', 'userBalanceBTC'];
+    if (!validFields.includes(field)) {
+      await ctx.reply('❌ Неизвестное поле для редактирования.');
+      return;
+    }
+
+    const fieldLabels: Record<string, string> = {
+      firstName: 'Имя',
+      username: 'Username',
+      userBalanceUSDT: 'баланс USDT',
+      userBalanceBTC: 'баланс BTC',
+    };
+
+    ctx.session.awaitingEditField = { userId, field };
+    await ctx.reply(
+      `✏️ Введите новое значение для поля **${fieldLabels[field] || field}**:\n` +
+      `(отправьте /cancel для отмены)`,
+      { parse_mode: 'Markdown' },
+    );
+  }
+
+  @Action(/^er_(admin|user)_(\d+)$/)
+  async onSetRole(@Ctx() ctx: Context) {
+    await ctx.answerCbQuery();
+    if (!this.checkAdmin(ctx)) return;
+
+    const match = (ctx as any).match;
+    const newRole = match[1];
+    const userId = parseInt(match[2], 10);
+
+    const user = await this.userService.findById(userId);
+    if (!user) {
+      await ctx.reply('❌ Пользователь не найден.');
+      return;
+    }
+
+    await this.userService.update(userId, { role: newRole });
+    await ctx.reply(`✅ Роль изменена на **${newRole}**.`, { parse_mode: 'Markdown' });
+    await this.botService.showUserEditFields(ctx, (await this.userService.findById(userId))!);
+  }
+
+  @Action(/^ea_(true|false)_(\d+)$/)
+  async onSetActive(@Ctx() ctx: Context) {
+    await ctx.answerCbQuery();
+    if (!this.checkAdmin(ctx)) return;
+
+    const match = (ctx as any).match;
+    const newActive = match[1] === 'true';
+    const userId = parseInt(match[2], 10);
+
+    const user = await this.userService.findById(userId);
+    if (!user) {
+      await ctx.reply('❌ Пользователь не найден.');
+      return;
+    }
+
+    await this.userService.update(userId, { userIsActive: newActive });
+    const status = newActive ? 'активирован' : 'деактивирован';
+    await ctx.reply(`✅ Пользователь **${status}**.`, { parse_mode: 'Markdown' });
+
+    if (newActive) {
+      await this.botService.sendActivationNotificationToUser(ctx, user.telegramId);
+    }
+
+    await this.botService.showUserEditFields(ctx, (await this.userService.findById(userId))!);
+  }
+
+  @Action(/^cancel_edit/)
+  async onCancelEdit(@Ctx() ctx: Context & { session: SessionData }) {
+    await ctx.answerCbQuery();
+    ctx.session.awaitingEditField = undefined;
+    await this.botService.showEditUsersList(ctx);
+  }
+
+  // ─── Delete user (with confirmation) ─────────────────────────
+
+  @Action(/^del_(\d+)$/)
+  async onDeleteUser(@Ctx() ctx: Context) {
+    await ctx.answerCbQuery();
+    if (!this.checkAdmin(ctx)) return;
+
+    const match = (ctx as any).match;
+    const userId = parseInt(match[1], 10);
+    const user = await this.userService.findById(userId);
+
+    if (!user) {
+      await ctx.reply('❌ Пользователь не найден.');
+      return;
+    }
+
+    const name = user.firstName || user.username || `ID ${user.telegramId}`;
+    await ctx.reply(
+      `⚠️ **Удалить пользователя?**\n\n${name}\nTelegram ID: \`${user.telegramId}\`\n\nЭто действие необратимо!`,
+      {
+        parse_mode: 'Markdown',
+        ...Markup.inlineKeyboard([
+          [
+            Markup.button.callback('✅ Да, удалить', `delyes_${userId}`),
+            Markup.button.callback('❌ Нет', `delno_${userId}`),
+          ],
+        ]),
+      },
+    );
+  }
+
+  @Action(/^delyes_(\d+)$/)
+  async onDeleteConfirm(@Ctx() ctx: Context) {
+    await ctx.answerCbQuery();
+    if (!this.checkAdmin(ctx)) return;
+
+    const match = (ctx as any).match;
+    const userId = parseInt(match[1], 10);
+    const user = await this.userService.findById(userId);
+
+    if (!user) {
+      await ctx.reply('❌ Пользователь не найден (возможно, уже удалён).');
+      return;
+    }
+
+    const name = user.firstName || user.username || `ID ${user.telegramId}`;
+    await this.userService.delete(userId);
+    await ctx.reply(`🗑 Пользователь **${name}** удалён.`, { parse_mode: 'Markdown' });
+    await this.botService.showEditUsersList(ctx);
+  }
+
+  @Action(/^delno_(\d+)$/)
+  async onDeleteCancel(@Ctx() ctx: Context) {
+    await ctx.answerCbQuery();
+    if (!this.checkAdmin(ctx)) return;
+
+    const match = (ctx as any).match;
+    const userId = parseInt(match[1], 10);
+    const user = await this.userService.findById(userId);
+
+    if (!user) {
+      await ctx.reply('❌ Пользователь не найден.');
+      return;
+    }
+
+    await this.botService.showUserEditFields(ctx, user);
+  }
+
+  // ─── Text handler ────────────────────────────────────────────
+
   @On('text')
   async onMessage(@Ctx() ctx: Context & { session: SessionData }) {
     if (ctx.message && 'text' in ctx.message) {
-      const replyText = this.botService.processText(ctx.message.text);
+      const text = ctx.message.text;
+
+      // ── /cancel during edit ────────────────────────────────
+      if (text === '/cancel' && ctx.session?.awaitingEditField) {
+        ctx.session.awaitingEditField = undefined;
+        await ctx.reply('❌ Редактирование отменено.');
+        return;
+      }
+
+      // ── Inactive user guard ────────────────────────────────
+      if (!(await this.checkActive(ctx))) return;
+
+      // ── Awaiting edit field input ───────────────────────────
+      if (ctx.session?.awaitingEditField) {
+        await this.handleEditFieldInput(ctx, text);
+        return;
+      }
+
+      // ── Route /seeusers manually ────────────────────────────
+      if (text.trim().match(/^\/seeusers(@\w+)?$/)) {
+        await this.handleSeeUsers(ctx);
+        return;
+      }
+
+      // ── Skip other commands ─────────────────────────────────
+      if (text.startsWith('/')) {
+        return;
+      }
+
+      // ── Echo for regular text ───────────────────────────────
+      const replyText = this.botService.processText(text);
       await ctx.reply(replyText);
     }
   }
 
-  /** Admin-only: list all users */
+  // ─── /seeusers handlers ──────────────────────────────────────
+
   @Command('seeusers')
   async onSeeUsers(@Ctx() ctx: Context) {
+    await this.handleSeeUsers(ctx);
+  }
+
+  @Action('seeusers')
+  async onSeeUsersAction(@Ctx() ctx: Context) {
+    await ctx.answerCbQuery();
+    await this.handleSeeUsers(ctx);
+  }
+
+  // ─── Private helpers ─────────────────────────────────────────
+
+  /** Generate a random math CAPTCHA and send it to the user */
+  private async sendCaptcha(ctx: Context, user: User) {
+    const a = Math.floor(Math.random() * 20) + 1;
+    const b = Math.floor(Math.random() * 20) + 1;
+    const correctAnswer = a + b;
+
+    (ctx as any).session.captchaPending = { answer: correctAnswer, user };
+
+    const variants = new Set<number>();
+    variants.add(correctAnswer);
+    while (variants.size < 4) {
+      const offset = (Math.floor(Math.random() * 10) - 5) || 1;
+      const wrong = correctAnswer + offset;
+      if (wrong >= 0 && wrong <= 100) {
+        variants.add(wrong);
+      }
+    }
+
+    const shuffled = [...variants].sort(() => Math.random() - 0.5);
+
+    const buttons = shuffled.map((val) =>
+      [Markup.button.callback(`${val}`, `captcha_${val}`)],
+    );
+
+    await ctx.reply(
+      `🤖 **Проверка на бота**\n\nРеши пример: **${a} + ${b} = ?**`,
+      { parse_mode: 'Markdown', ...Markup.inlineKeyboard(buttons) },
+    );
+  }
+
+  /** Shared logic for listing users (admin-only) */
+  private async handleSeeUsers(ctx: Context) {
     const tgUser = ctx.from;
     if (!tgUser) {
       await ctx.reply('Не удалось определить пользователя.');
@@ -203,16 +689,119 @@ export class BotUpdate {
     }
 
     const lines = users.map((u, i) => {
-      const role = u.role === 'admin' ? '👑' : '👤';
+      const role = u.role === 'admin' ? '👑 admin' : '👤 user';
       const name = u.firstName || '—';
       const username = u.username ? `@${u.username}` : '—';
       const lang = u.languageCode || '—';
       const premium = u.isPremium ? '⭐' : '';
+      const active = u.userIsActive ? '✅' : '⏳';
+      const blocked = u.userIsBlocked ? ' 🚫' : '';
       const created = u.createdAt?.toISOString().replace('T', ' ').slice(0, 19) || '—';
-      return `${i + 1}. ${role}${premium} **${name}** (${username})\n   ID: \`${u.telegramId}\` | ${lang} | ${created}`;
+      return `${i + 1}. ${role}${premium} **${name}** (${username})${blocked}\n` +
+        `   ID: \`${u.telegramId}\` | ${lang} | ${created}\n` +
+        `   💰 ${u.userBalanceUSDT} USDT / ${u.userBalanceBTC} BTC | ${active} ${u.userIsActive ? 'Активен' : 'Ожидает'}`;
     });
 
     const message = `📋 **Список пользователей** (${users.length}):\n\n${lines.join('\n\n')}`;
     await ctx.reply(message, { parse_mode: 'Markdown' });
+  }
+
+  /** Process edit field text input */
+  private async handleEditFieldInput(ctx: Context & { session: SessionData }, text: string) {
+    const { userId, field } = ctx.session.awaitingEditField!;
+    const user = await this.userService.findById(userId);
+
+    if (!user) {
+      ctx.session.awaitingEditField = undefined;
+      await ctx.reply('❌ Пользователь не найден.');
+      return;
+    }
+
+    let value: string | number = text.trim();
+
+    if (field === 'userBalanceUSDT' || field === 'userBalanceBTC') {
+      const num = parseFloat(value);
+      if (isNaN(num) || num < 0) {
+        await ctx.reply('❌ Введите положительное число.');
+        return;
+      }
+      value = num;
+    }
+
+    await this.userService.update(userId, { [field]: value } as any);
+    ctx.session.awaitingEditField = undefined;
+
+    await ctx.reply('✅ Значение обновлено.');
+    await this.botService.showUserEditFields(ctx, (await this.userService.findById(userId))!);
+  }
+
+  /** Handle activate action from inline button */
+  private async handleActivateUser(ctx: Context) {
+    const tgUser = ctx.from;
+    if (!tgUser) {
+      await ctx.reply('Не удалось определить пользователя.');
+      return;
+    }
+
+    if (!this.userService.isAdmin(tgUser.id)) {
+      await ctx.reply('⛔ Эта команда доступна только администраторам.');
+      return;
+    }
+
+    const match = (ctx as any).match;
+    const targetTelegramId = parseInt(match[1], 10);
+    const targetUser = await this.userService.findByTelegramId(targetTelegramId);
+
+    if (!targetUser) {
+      await ctx.reply('❌ Пользователь не найден.');
+      return;
+    }
+
+    if (targetUser.userIsActive) {
+      await ctx.reply('ℹ️ Пользователь уже активирован.');
+      return;
+    }
+
+    await this.userService.update(targetUser.id, { userIsActive: true });
+    await ctx.reply(
+      `✅ Пользователь **${targetUser.firstName || targetUser.username || targetTelegramId}** активирован!`,
+      { parse_mode: 'Markdown' },
+    );
+    await this.botService.sendActivationNotificationToUser(ctx, targetTelegramId);
+  }
+
+  /** Check if current user is admin — reply error if not */
+  private checkAdmin(ctx: Context): boolean {
+    const tgUser = ctx.from;
+    if (!tgUser) {
+      ctx.reply('Не удалось определить пользователя.');
+      return false;
+    }
+    if (!this.userService.isAdmin(tgUser.id)) {
+      ctx.reply('⛔ Эта функция доступна только администраторам.');
+      return false;
+    }
+    return true;
+  }
+
+  /** Check if current user is active — reply appropriate message if not.
+   *  Returns true if user is active or not found in DB. */
+  private async checkActive(ctx: Context): Promise<boolean> {
+    const tgUser = ctx.from;
+    if (!tgUser) {
+      await ctx.reply('Не удалось определить пользователя.');
+      return false;
+    }
+    const dbUser = await this.userService.findByTelegramId(tgUser.id);
+    if (!dbUser) return true;
+    if (dbUser.userIsBlocked) {
+      await this.botService.sendBlockedMessage(ctx);
+      return false;
+    }
+    if (!dbUser.userIsActive) {
+      await this.botService.sendPendingActivationMessage(ctx);
+      return false;
+    }
+    return true;
   }
 }

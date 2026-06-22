@@ -25,6 +25,10 @@ export class UserService {
     return this.userRepo.findOne({ where: { telegramId } });
   }
 
+  async findById(id: number): Promise<User | null> {
+    return this.userRepo.findOne({ where: { id } });
+  }
+
   /** Check if a Telegram ID belongs to an admin (from ADMIN_IDS env var) */
   isAdmin(telegramId: number): boolean {
     const adminIds = this.getAdminIds();
@@ -80,15 +84,34 @@ export class UserService {
     return (await this.userRepo.findOne({ where: { id: userId } }))!;
   }
 
+  async delete(userId: number): Promise<void> {
+    await this.userRepo.delete(userId);
+  }
+
   async findByAuthToken(token: string): Promise<User | null> {
     return this.userRepo.findOne({ where: { authToken: token } });
   }
 
-  /** Get all users (admin only) */
+  /** Get all users — admins first, then by registration date DESC */
   async findAll(): Promise<User[]> {
+    return this.userRepo
+      .createQueryBuilder('user')
+      .orderBy("CASE WHEN user.role = 'admin' THEN 0 ELSE 1 END")
+      .addOrderBy('user.createdAt', 'DESC')
+      .getMany();
+  }
+
+  /** Get users awaiting activation (not active, not blocked) */
+  async findPending(): Promise<User[]> {
     return this.userRepo.find({
+      where: { userIsActive: false, userIsBlocked: false },
       order: { createdAt: 'DESC' },
     });
+  }
+
+  /** Get all admin users */
+  async findAllAdmins(): Promise<User[]> {
+    return this.userRepo.find({ where: { role: 'admin' } });
   }
 
   private async updateProfile(user: User, profile: TelegramProfile): Promise<User> {

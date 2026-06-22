@@ -41,6 +41,22 @@ export class User {
   @Column({ type: 'varchar', length: 16, default: 'user' })
   role!: string;
 
+  /** USDT balance */
+  @Column({ type: 'real', default: 0 })
+  userBalanceUSDT!: number;
+
+  /** BTC balance */
+  @Column({ type: 'real', default: 0 })
+  userBalanceBTC!: number;
+
+  /** Whether the user has been activated by an admin */
+  @Column({ type: 'boolean', default: false })
+  userIsActive!: boolean;
+
+  /** Whether the user has been blocked/banned by an admin */
+  @Column({ type: 'boolean', default: false })
+  userIsBlocked!: boolean;
+
   @CreateDateColumn()
   createdAt!: Date;
 

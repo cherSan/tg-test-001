@@ -40,6 +40,21 @@ export class BotUpdate {
     await ctx.reply(`Ваш Telegram ID: ${ctx.from?.id}`);
   }
 
+  @Hears('what?')
+  async onWhat(@Ctx() ctx: Context) {
+    try {
+      const data = await fetch('http://127.0.0.1:13544/api/ui-traffic-stats', {
+        method: 'GET',
+        headers: {
+        },
+      });
+      const res = await data.json();
+      await ctx.reply('Вы выбрали покупку.' + JSON.stringify(res));
+    } catch(e) {
+      await ctx.reply('Something wrong!.' + JSON.stringify(e.message));
+    }
+  }
+
   @Action('buy')
   async onBuy(@Ctx() ctx: Context) {
     await ctx.answerCbQuery('Гоните монетку', { show_alert: true });

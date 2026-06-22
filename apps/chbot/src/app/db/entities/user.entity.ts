@@ -49,6 +49,10 @@ export class User {
   @Column({ type: 'real', default: 0 })
   userBalanceBTC!: number;
 
+  /** GRAM (TON) balance */
+  @Column({ type: 'real', default: 0 })
+  userBalanceGram!: number;
+
   /** Whether the user has been activated by an admin */
   @Column({ type: 'boolean', default: false })
   userIsActive!: boolean;
@@ -56,6 +60,10 @@ export class User {
   /** Whether the user has been blocked/banned by an admin */
   @Column({ type: 'boolean', default: false })
   userIsBlocked!: boolean;
+
+  /** Subscription expiry date (null = no active subscription) */
+  @Column({ type: 'datetime', nullable: true })
+  subscriptionExpiresAt!: Date | null;
 
   @CreateDateColumn()
   createdAt!: Date;

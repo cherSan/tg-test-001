@@ -171,7 +171,7 @@ export class BotUpdate {
 
   // ─── Notification actions (block / delete from notify) ─────
 
-  /** Block user from admin notification */
+  /** Block user from admin notification or edit screen */
   @Action(/^block_(\d+)$/)
   async onBlockUser(@Ctx() ctx: Context) {
     await ctx.answerCbQuery();
@@ -187,16 +187,32 @@ export class BotUpdate {
     }
 
     if (user.userIsBlocked) {
-      await ctx.reply('ℹ️ Пользователь уже заблокирован.');
+      await ctx.answerCbQuery('Уже заблокирован');
       return;
     }
 
     await this.userService.update(user.id, { userIsBlocked: true });
     const name = user.firstName || user.username || `ID ${telegramId}`;
-    await ctx.reply(
-      `🚫 Пользователь **${name}** заблокирован.`,
-      { parse_mode: 'Markdown' },
-    );
+
+    // Edit the original message to remove action buttons
+    try {
+      await ctx.editMessageText(
+        `🚫 Пользователь **${name}** заблокирован.`,
+        { parse_mode: 'Markdown' },
+      );
+    } catch (_) {
+      // Fallback: send as new reply
+      await ctx.reply(
+        `🚫 Пользователь **${name}** заблокирован.`,
+        { parse_mode: 'Markdown' },
+      );
+    }
+
+    // Refresh edit fields if triggered from edit screen
+    const updated = await this.userService.findByTelegramId(telegramId);
+    if (updated) {
+      await this.botService.showUserEditFields(ctx, updated);
+    }
   }
 
   /** Unblock user from edit screen */
@@ -291,7 +307,7 @@ export class BotUpdate {
         `Username: ${dbUser?.username ? '@' + dbUser.username : '—'}\n` +
         `Premium: ${dbUser?.isPremium ? '✅' : '❌'}\n` +
         `Роль: ${dbUser?.role || '—'}\n` +
-        `Баланс: ${dbUser?.userBalanceUSDT} USDT / ${dbUser?.userBalanceBTC} BTC\n` +
+        `Баланс: ${dbUser?.userBalanceUSDT} USDT / ${dbUser?.userBalanceBTC} BTC / ${dbUser?.userBalanceGram} GRAM\n` +
         `Статус: ${dbUser?.userIsActive ? '✅ Активен' : '⏳ Ожидает активации'}\n` +
         `Создан: ${dbUser?.createdAt?.toISOString() || '—'}\n` +
         `\n🔑 Auth token: \`${dbUser?.authToken?.slice(0, 16)}...\``,
@@ -322,30 +338,47 @@ export class BotUpdate {
     }
   }
 
+  @Action('balance')
+  async onBalance(@Ctx() ctx: Context) {
+    await ctx.answerCbQuery();
+    if (!(await this.checkActive(ctx))) return;
+
+    const tgUser = ctx.from!;
+    const dbUser = await this.userService.findByTelegramId(tgUser.id);
+    if (!dbUser) {
+      await ctx.reply('❌ Пользователь не найден.');
+      return;
+    }
+    await this.botService.showUserBalance(ctx, dbUser);
+  }
+
+  @Action('my_subscription')
+  async onMySubscription(@Ctx() ctx: Context) {
+    await ctx.answerCbQuery();
+    if (!(await this.checkActive(ctx))) return;
+
+    const tgUser = ctx.from!;
+    const dbUser = await this.userService.findByTelegramId(tgUser.id);
+    if (!dbUser) {
+      await ctx.reply('❌ Пользователь не найден.');
+      return;
+    }
+    await this.botService.showMySubscription(ctx, dbUser);
+  }
+
   @Action('buy')
   async onBuy(@Ctx() ctx: Context) {
     await ctx.answerCbQuery();
     if (!(await this.checkActive(ctx))) return;
 
-    await ctx.reply('Вы выбрали покупку.');
-
-    await ctx.replyWithInvoice({
-      title: 'Подписка на бота',
-      description: 'Доступ к расширенным функциям на 1 месяц',
-      payload: 'month_subscription_payload',
-      provider_token: process.env.TG_PAYMENT_TOKEN!,
-      currency: 'RUB',
-      prices: [
-        { label: 'Основной тариф', amount: 29900 },
-      ],
-      start_parameter: 'get-subscription',
-    });
+    await this.botService.showBuySubscription(ctx);
   }
 
   @Action('get_link')
   async onGetLink(@Ctx() ctx: Context) {
     await ctx.answerCbQuery();
     if (!(await this.checkActive(ctx))) return;
+    if (!(await this.checkSubscription(ctx))) return;
     await ctx.reply('Вот ваша ссылка.');
   }
 
@@ -353,6 +386,7 @@ export class BotUpdate {
   async onGetQR(@Ctx() ctx: Context) {
     await ctx.answerCbQuery();
     if (!(await this.checkActive(ctx))) return;
+    if (!(await this.checkSubscription(ctx))) return;
     const qr = await this.qr.generateQrBuffer('HELLO, TEST CONNECTION');
     await ctx.reply('Вот ваш QR-код.');
     await ctx.sendPhoto({ source: qr });
@@ -441,7 +475,7 @@ export class BotUpdate {
     const field = match[1];
     const userId = parseInt(match[2], 10);
 
-    const validFields = ['firstName', 'username', 'userBalanceUSDT', 'userBalanceBTC'];
+    const validFields = ['firstName', 'username', 'userBalanceUSDT', 'userBalanceBTC', 'userBalanceGram'];
     if (!validFields.includes(field)) {
       await ctx.reply('❌ Неизвестное поле для редактирования.');
       return;
@@ -452,6 +486,7 @@ export class BotUpdate {
       username: 'Username',
       userBalanceUSDT: 'баланс USDT',
       userBalanceBTC: 'баланс BTC',
+      userBalanceGram: 'баланс GRAM',
     };
 
     ctx.session.awaitingEditField = { userId, field };
@@ -505,6 +540,35 @@ export class BotUpdate {
       await this.botService.sendActivationNotificationToUser(ctx, user.telegramId);
     }
 
+    await this.botService.showUserEditFields(ctx, (await this.userService.findById(userId))!);
+  }
+
+  /** Admin: add 7 days to user subscription */
+  @Action(/^subadd_(\d+)$/)
+  async onSubAdd(@Ctx() ctx: Context) {
+    await ctx.answerCbQuery();
+    if (!this.checkAdmin(ctx)) return;
+
+    const match = (ctx as any).match;
+    const userId = parseInt(match[1], 10);
+    const user = await this.userService.findById(userId);
+
+    if (!user) {
+      await ctx.reply('❌ Пользователь не найден.');
+      return;
+    }
+
+    const now = new Date();
+    const base = user.subscriptionExpiresAt && user.subscriptionExpiresAt > now
+      ? new Date(user.subscriptionExpiresAt)
+      : now;
+    const newExpiry = new Date(base.getTime() + 7 * 24 * 60 * 60 * 1000);
+
+    await this.userService.update(userId, { subscriptionExpiresAt: newExpiry });
+    await ctx.reply(
+      `📅 Подписка продлена до **${newExpiry.toISOString().replace('T', ' ').slice(0, 19)}**`,
+      { parse_mode: 'Markdown' },
+    );
     await this.botService.showUserEditFields(ctx, (await this.userService.findById(userId))!);
   }
 
@@ -699,7 +763,7 @@ export class BotUpdate {
       const created = u.createdAt?.toISOString().replace('T', ' ').slice(0, 19) || '—';
       return `${i + 1}. ${role}${premium} **${name}** (${username})${blocked}\n` +
         `   ID: \`${u.telegramId}\` | ${lang} | ${created}\n` +
-        `   💰 ${u.userBalanceUSDT} USDT / ${u.userBalanceBTC} BTC | ${active} ${u.userIsActive ? 'Активен' : 'Ожидает'}`;
+        `   💰 ${u.userBalanceUSDT} USDT / ${u.userBalanceBTC} BTC / ${u.userBalanceGram} GRAM | ${active} ${u.userIsActive ? 'Активен' : 'Ожидает'}`;
     });
 
     const message = `📋 **Список пользователей** (${users.length}):\n\n${lines.join('\n\n')}`;
@@ -719,7 +783,7 @@ export class BotUpdate {
 
     let value: string | number = text.trim();
 
-    if (field === 'userBalanceUSDT' || field === 'userBalanceBTC') {
+    if (field === 'userBalanceUSDT' || field === 'userBalanceBTC' || field === 'userBalanceGram') {
       const num = parseFloat(value);
       if (isNaN(num) || num < 0) {
         await ctx.reply('❌ Введите положительное число.');
@@ -763,10 +827,21 @@ export class BotUpdate {
     }
 
     await this.userService.update(targetUser.id, { userIsActive: true });
-    await ctx.reply(
-      `✅ Пользователь **${targetUser.firstName || targetUser.username || targetTelegramId}** активирован!`,
-      { parse_mode: 'Markdown' },
-    );
+    const name = targetUser.firstName || targetUser.username || `${targetTelegramId}`;
+
+    // Edit the notification message to remove action buttons
+    try {
+      await ctx.editMessageText(
+        `✅ Пользователь **${name}** активирован!`,
+        { parse_mode: 'Markdown' },
+      );
+    } catch (_) {
+      await ctx.reply(
+        `✅ Пользователь **${name}** активирован!`,
+        { parse_mode: 'Markdown' },
+      );
+    }
+
     await this.botService.sendActivationNotificationToUser(ctx, targetTelegramId);
   }
 
@@ -779,6 +854,18 @@ export class BotUpdate {
     }
     if (!this.userService.isAdmin(tgUser.id)) {
       ctx.reply('⛔ Эта функция доступна только администраторам.');
+      return false;
+    }
+    return true;
+  }
+
+  /** Check if current user has an active subscription — reply if not. */
+  private async checkSubscription(ctx: Context): Promise<boolean> {
+    const tgUser = ctx.from;
+    if (!tgUser) return false;
+    const dbUser = await this.userService.findByTelegramId(tgUser.id);
+    if (!dbUser || !this.botService.hasActiveSubscription(dbUser)) {
+      await ctx.reply('🔒 Эта функция доступна только с активной подпиской.\nКупите подписку через 💳 Купить подписку.');
       return false;
     }
     return true;

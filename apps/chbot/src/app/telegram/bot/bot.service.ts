@@ -22,22 +22,35 @@ export class BotService {
     const tgUser = ctx.from;
     const isAdmin = tgUser ? this.userService.isAdmin(tgUser.id) : false;
 
+    // Check subscription for feature gating
+    const dbUser = tgUser ? await this.userService.findByTelegramId(tgUser.id) : null;
+    const hasSub = dbUser ? this.hasActiveSubscription(dbUser) : false;
+
     const buttons: any[][] = [
       [
         Markup.button.url('Читать правила', 'https://telegram.org'),
       ],
       [
-        Markup.button.callback('Купить', 'buy'),
+        Markup.button.callback('💰 Баланс', 'balance'),
+        Markup.button.callback('💳 Купить подписку', 'buy'),
       ],
       [
-        Markup.button.callback('Получить QR', 'get_qr'),
-        Markup.button.callback('Получить ссылку', 'get_link'),
-      ],
-      [
-        Markup.button.callback('Тест визарда', 'wizard_test'),
-        Markup.button.callback('Тест сцены', 'scene_test'),
+        Markup.button.callback('📋 Мои подписки', 'my_subscription'),
       ],
     ];
+
+    // Premium features — only for active subscribers
+    if (hasSub) {
+      buttons.push([
+        Markup.button.callback('Получить QR', 'get_qr'),
+        Markup.button.callback('Получить ссылку', 'get_link'),
+      ]);
+    }
+
+    buttons.push([
+      Markup.button.callback('Тест визарда', 'wizard_test'),
+      Markup.button.callback('Тест сцены', 'scene_test'),
+    ]);
 
     if (isAdmin) {
       buttons.push([Markup.button.callback('👥 Пользователи', 'seeusers')]);
@@ -184,6 +197,133 @@ export class BotService {
     });
   }
 
+  /** Show user's balances */
+  async showUserBalance(ctx: Context, user: User) {
+    const usdt = user.userBalanceUSDT?.toFixed(2) || '0.00';
+    const btc = user.userBalanceBTC?.toFixed(8) || '0.00000000';
+    const gram = user.userBalanceGram?.toFixed(2) || '0.00';
+
+    const message =
+      `💰 **Ваш баланс**\n\n` +
+      `💵 USDT: **${usdt}**\n` +
+      `₿  BTC: **${btc}**\n` +
+      `💎 GRAM: **${gram}**\n\n` +
+      `Для пополнения нажмите «💳 Купить подписку» в меню.`;
+
+    await ctx.reply(message, { parse_mode: 'Markdown' });
+  }
+
+  /** Check if user has an active (non-expired) subscription */
+  hasActiveSubscription(user: User): boolean {
+    if (!user.subscriptionExpiresAt) return false;
+    return new Date(user.subscriptionExpiresAt) > new Date();
+  }
+
+  /** Show user's current subscription status */
+  async showMySubscription(ctx: Context, user: User) {
+    const hasSub = this.hasActiveSubscription(user);
+    const expires = user.subscriptionExpiresAt
+      ? new Date(user.subscriptionExpiresAt).toISOString().replace('T', ' ').slice(0, 19)
+      : null;
+
+    let message: string;
+    if (hasSub && expires) {
+      const now = new Date();
+      const expDate = new Date(user.subscriptionExpiresAt!);
+      const daysLeft = Math.ceil((expDate.getTime() - now.getTime()) / (1000 * 60 * 60 * 24));
+      message =
+        `📋 **Мои подписки**\n\n` +
+        `✅ Подписка активна\n` +
+        `📅 Истекает: ${expires}\n` +
+        `⏳ Осталось дней: **${daysLeft}**\n\n` +
+        `Продлите подписку через 💳 Купить подписку`;
+    } else if (expires) {
+      message =
+        `📋 **Мои подписки**\n\n` +
+        `❌ Подписка истекла\n` +
+        `📅 Истекла: ${expires}\n\n` +
+        `Купите новую подписку через 💳 Купить подписку`;
+    } else {
+      message =
+        `📋 **Мои подписки**\n\n` +
+        `❌ Нет активных подписок\n\n` +
+        `Купите подписку через 💳 Купить подписку`;
+    }
+
+    await ctx.reply(message, { parse_mode: 'Markdown' });
+  }
+
+  /** Fetch live BTC/USDT and TON/USDT rates from CoinEx */
+  async fetchCoinExRates(): Promise<{ btcUsdt: number; tonUsdt: number }> {
+    try {
+      const [btcRes, tonRes] = await Promise.all([
+        fetch('https://api.coinex.com/v2/spot/market/ticker?market=BTCUSDT'),
+        fetch('https://api.coinex.com/v2/spot/market/ticker?market=TONUSDT'),
+      ]);
+      const btcData = await btcRes.json() as any;
+      const tonData = await tonRes.json() as any;
+      const btcUsdt = parseFloat(btcData?.data?.last) || 0;
+      const tonUsdt = parseFloat(tonData?.data?.last) || 0;
+      return { btcUsdt, tonUsdt };
+    } catch {
+      return { btcUsdt: 0, tonUsdt: 0 };
+    }
+  }
+
+  /** Calculate subscription plan prices from env */
+  getSubscriptionPlans(rates: { btcUsdt: number; tonUsdt: number }) {
+    const plans = [
+      { label: '🆓 Пробный', hours: 24, usdt: parseFloat(process.env.SUBSCRIPTION_24H_USDT || '0') },
+      { label: '📅 7 дней', hours: 168, usdt: parseFloat(process.env.SUBSCRIPTION_7D_USDT || '5') },
+      { label: '📅 14 дней', hours: 336, usdt: parseFloat(process.env.SUBSCRIPTION_14D_USDT || '13.5') },
+      { label: '📅 1 месяц', hours: 720, usdt: parseFloat(process.env.SUBSCRIPTION_30D_USDT || '22.5') },
+      { label: '📅 6 месяцев', hours: 4320, usdt: parseFloat(process.env.SUBSCRIPTION_180D_USDT || '90') },
+    ];
+
+    return plans.map((p) => {
+      const btc = rates.btcUsdt > 0 ? +(p.usdt / rates.btcUsdt).toFixed(8) : null;
+      const gram = rates.tonUsdt > 0 ? +(p.usdt / rates.tonUsdt).toFixed(2) : null;
+      return { ...p, btc, gram };
+    });
+  }
+
+  /** Show subscription purchase info with payment addresses */
+  async showBuySubscription(ctx: Context) {
+    const rates = await this.fetchCoinExRates();
+    const plans = this.getSubscriptionPlans(rates);
+    const usdtAddr = process.env.USDT_PAYMENT_ADDRESS || 'не задан';
+    const btcAddr = process.env.BTC_PAYMENT_ADDRESS || 'не задан';
+    const gramAddr = process.env.GRAM_PAYMENT_ADDRESS || 'не задан';
+
+    // Build plans table
+    let plansText = '';
+    for (const p of plans) {
+      const btcStr = p.btc !== null ? `**${p.btc}** BTC` : '—';
+      const gramStr = p.gram !== null ? `**${p.gram}** GRAM` : '—';
+      if (p.usdt === 0) {
+        plansText += `${p.label}: **Бесплатно**\n`;
+      } else {
+        plansText += `${p.label}: **${p.usdt}** USDT (${btcStr} / ${gramStr})\n`;
+      }
+    }
+
+    const ratesInfo = rates.btcUsdt > 0
+      ? `\n📊 Курс CoinEx: 1 BTC = **${rates.btcUsdt}** USDT | 1 TON = **${rates.tonUsdt}** USDT\n`
+      : '\n⚠️ Не удалось получить курс CoinEx, цены в BTC/GRAM не рассчитаны.\n';
+
+    const message =
+      `💳 **Покупка подписки**\n\n` +
+      `Тарифы:\n${plansText}` +
+      ratesInfo +
+      `\nАдреса для оплаты:\n` +
+      `💵 USDT: \`${usdtAddr}\`\n` +
+      `₿  BTC: \`${btcAddr}\`\n` +
+      `💎 GRAM: \`${gramAddr}\`\n\n` +
+      `После отправки средств баланс будет зачислен автоматически.`;
+
+    await ctx.reply(message, { parse_mode: 'Markdown' });
+  }
+
   /** Show users awaiting activation (admin only) */
   async showPendingUsers(ctx: Context) {
     const users = await this.userService.findPending();
@@ -221,8 +361,9 @@ export class BotService {
       `${roleIcon} **${name}** (${username})\n` +
       `🆔 Telegram ID: \`${user.telegramId}\`\n` +
       `💼 Роль: ${user.role}\n` +
-      `💰 Баланс: ${user.userBalanceUSDT} USDT / ${user.userBalanceBTC} BTC\n` +
+      `💰 Баланс: ${user.userBalanceUSDT} USDT / ${user.userBalanceBTC} BTC / ${user.userBalanceGram} GRAM\n` +
       `📌 Статус: ${activeStatus}\n` +
+      `📋 Подписка: ${user.subscriptionExpiresAt ? 'до ' + new Date(user.subscriptionExpiresAt!).toISOString().replace('T', ' ').slice(0, 19) : 'нет'}\n` +
       (blockedStatus ? `🚫 ${blockedStatus}\n` : '') +
       `📅 Создан: ${user.createdAt?.toISOString().replace('T', ' ').slice(0, 19) || '—'}\n\n` +
       `Выберите поле для редактирования:`;
@@ -235,6 +376,7 @@ export class BotService {
       [
         Markup.button.callback('💵 USDT', `ef_userBalanceUSDT_${user.id}`),
         Markup.button.callback('₿ BTC', `ef_userBalanceBTC_${user.id}`),
+        Markup.button.callback('💎 GRAM', `ef_userBalanceGram_${user.id}`),
       ],
       [
         user.role === 'admin'
@@ -252,6 +394,7 @@ export class BotService {
           : Markup.button.callback('🚫 Заблокировать', `block_${user.telegramId}`),
       ],
       [
+        Markup.button.callback('📅 Подписка +7д', `subadd_${user.id}`),
         Markup.button.callback('🗑 Удалить', `del_${user.id}`),
         Markup.button.callback('🔙 К списку', 'edit_users'),
       ],

@@ -253,20 +253,39 @@ export class BotService {
     await ctx.reply(message, { parse_mode: 'Markdown' });
   }
 
-  /** Fetch live BTC/USDT and TON/USDT rates from CoinEx */
-  async fetchCoinExRates(): Promise<{ btcUsdt: number; tonUsdt: number }> {
+  /** Fetch live BTC/USDT and GRAM/USDT rates from configured exchange */
+  async fetchCoinExRates(): Promise<{ btcUsdt: number; tonUsdt: number; exchange: string }> {
+    const exchange = (process.env.EXCHANGE_API || 'coinex').toLowerCase();
+
     try {
-      const [btcRes, tonRes] = await Promise.all([
-        fetch('https://api.coinex.com/v2/spot/market/ticker?market=BTCUSDT'),
-        fetch('https://api.coinex.com/v2/spot/market/ticker?market=TONUSDT'),
+      if (exchange === 'binance') {
+        const [btcRes, tonRes] = await Promise.all([
+          fetch('https://api.binance.com/api/v3/ticker/price?symbol=BTCUSDT'),
+          fetch('https://api.binance.com/api/v3/ticker/price?symbol=TONUSDT'),
+        ]);
+        const btcData = await btcRes.json() as any;
+        const tonData = await tonRes.json() as any;
+        return {
+          btcUsdt: parseFloat(btcData?.price) || 0,
+          tonUsdt: parseFloat(tonData?.price) || 0,
+          exchange: 'Binance',
+        };
+      }
+
+      // Default: CoinEx v1
+      const [btcRes, gramRes] = await Promise.all([
+        fetch('https://api.coinex.com/v1/market/ticker?market=BTCUSDT'),
+        fetch('https://api.coinex.com/v1/market/ticker?market=GRAMUSDT'),
       ]);
       const btcData = await btcRes.json() as any;
-      const tonData = await tonRes.json() as any;
-      const btcUsdt = parseFloat(btcData?.data?.last) || 0;
-      const tonUsdt = parseFloat(tonData?.data?.last) || 0;
-      return { btcUsdt, tonUsdt };
+      const gramData = await gramRes.json() as any;
+      return {
+        btcUsdt: parseFloat(btcData?.data?.ticker?.last) || 0,
+        tonUsdt: parseFloat(gramData?.data?.ticker?.last) || 0,
+        exchange: 'CoinEx',
+      };
     } catch {
-      return { btcUsdt: 0, tonUsdt: 0 };
+      return { btcUsdt: 0, tonUsdt: 0, exchange: exchange };
     }
   }
 
@@ -307,9 +326,10 @@ export class BotService {
       }
     }
 
+    const exchangeName = rates.exchange || 'CoinEx';
     const ratesInfo = rates.btcUsdt > 0
-      ? `\n📊 Курс CoinEx: 1 BTC = **${rates.btcUsdt}** USDT | 1 TON = **${rates.tonUsdt}** USDT\n`
-      : '\n⚠️ Не удалось получить курс CoinEx, цены в BTC/GRAM не рассчитаны.\n';
+      ? `\n📊 Курс ${exchangeName}: 1 BTC = **${rates.btcUsdt}** USDT | 1 GRAM = **${rates.tonUsdt}** USDT\n`
+      : `\n⚠️ Не удалось получить курс ${exchangeName}, цены в BTC/GRAM не рассчитаны.\n`;
 
     const message =
       `💳 **Покупка подписки**\n\n` +

@@ -2,26 +2,56 @@ import {Update, Start, Help, On, Hears, Ctx, Command, Action, Settings} from 'ne
 import {Context} from 'telegraf';
 import { BotService } from './bot.service';
 import {QrCodeService} from "../../qr/qr.service";
+import {UserService} from "../../db/user.service";
 import {WIZARD_SCENE_ID} from "./test.wizzard";
 import {RND_SCENE_ID} from "./test.scene";
+
+interface SessionData {
+  user?: {
+    id: number;
+    telegramId: number;
+    firstName: string;
+    username: string | null;
+    authToken: string;
+  };
+}
 
 @Update()
 export class BotUpdate {
   constructor(
     private readonly botService: BotService,
     private readonly qr: QrCodeService,
+    private readonly userService: UserService,
   ) {}
 
   @Start()
   async onStart(@Ctx() ctx: Context) {
-    const username = ctx.from?.first_name || 'пользователь';
+    const tgUser = ctx.from;
+    if (!tgUser) {
+      await ctx.reply('Не удалось получить данные пользователя Telegram.');
+      return;
+    }
+
+    // Find or create user in database
+    const { user, created } = await this.userService.findOrCreate({
+      id: tgUser.id,
+      first_name: tgUser.first_name,
+      last_name: tgUser.last_name,
+      username: tgUser.username,
+      language_code: tgUser.language_code,
+      is_premium: tgUser.is_premium,
+    });
+
+    const status = created ? '✅ Вы зарегистрированы в системе.' : '👋 С возвращением!';
+    const username = user.firstName || tgUser.first_name || 'пользователь';
     const message = this.botService.getWelcomeMessage(username);
-    await ctx.reply(message);
+
+    await ctx.reply(`${message} ${status}`);
     await this.botService.botMenu(ctx);
   }
 
   @Command('menu')
-  async menu(@Ctx() ctx: Context) {
+  async menu(@Ctx() ctx: Context & { session: SessionData }) {
     await this.botService.showMenu(ctx);
   }
 
@@ -33,6 +63,31 @@ export class BotUpdate {
   @Settings()
   async settings(@Ctx() ctx: Context) {
     await ctx.reply('Доступные команды: /start, /help. Или просто отправьте текст.');
+  }
+
+  @Hears('whoami')
+  async onWhoAmI(@Ctx() ctx: Context & { session: SessionData }) {
+    const sessionUser = ctx.session?.user;
+
+    if (!sessionUser) {
+      await ctx.reply('❌ Вы не авторизованы. Отправьте /start для регистрации.');
+      return;
+    }
+
+    const dbUser = await this.userService.findByTelegramId(sessionUser.telegramId);
+
+    await ctx.reply(
+      `📋 *Ваш профиль*\n` +
+        `ID: ${dbUser?.id}\n` +
+        `Telegram ID: ${dbUser?.telegramId}\n` +
+        `Имя: ${dbUser?.firstName || '—'}\n` +
+        `Username: ${dbUser?.username ? '@' + dbUser.username : '—'}\n` +
+        `Premium: ${dbUser?.isPremium ? '✅' : '❌'}\n` +
+        `Язык: ${dbUser?.languageCode || '—'}\n` +
+        `Создан: ${dbUser?.createdAt?.toISOString() || '—'}\n` +
+        `\n🔑 Auth token: \`${dbUser?.authToken?.slice(0, 16)}...\``,
+      { parse_mode: 'Markdown' },
+    );
   }
 
   @Hears('id')
@@ -48,10 +103,11 @@ export class BotUpdate {
         headers: {
         },
       });
-      const res = await data.json();
-      await ctx.reply('Вы выбрали покупку.' + JSON.stringify(res));
-    } catch(e) {
-      await ctx.reply('Something wrong!.' + JSON.stringify(e.message));
+      const d = await data.json();
+      console.log(d);
+      await ctx.reply('Вы выбрали покупку.');
+    } catch(_) {
+      await ctx.reply('Something wrong!.');
     }
   }
 
@@ -118,7 +174,7 @@ export class BotUpdate {
   }
 
   @On('text')
-  async onMessage(@Ctx() ctx: Context) {
+  async onMessage(@Ctx() ctx: Context & { session: SessionData }) {
     if (ctx.message && 'text' in ctx.message) {
       const replyText = this.botService.processText(ctx.message.text);
       await ctx.reply(replyText);

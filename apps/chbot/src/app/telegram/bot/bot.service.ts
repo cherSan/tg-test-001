@@ -514,6 +514,10 @@ export class BotService {
     const activeStatus = user.userIsActive ? '✅ Активен' : '⏳ Ожидает активации';
     const blockedStatus = user.userIsBlocked ? '🚫 Заблокирован' : '';
 
+    const peerInfo = user.amneziaPeerId
+      ? `\n🔐 VPN пир: \`${user.amneziaPeerId.slice(0, 8)}...\``
+      : '\n🔐 VPN пир: не создан';
+
     const info =
       `📝 **Редактирование пользователя**\n\n` +
       `${roleIcon} **${name}** (${username})\n` +
@@ -521,9 +525,9 @@ export class BotService {
       `💼 Роль: ${user.role}\n` +
       `💰 Баланс: ${user.userBalanceUSDT} USDT / ${user.userBalanceBTC} BTC / ${user.userBalanceGram} GRAM\n` +
       `📌 Статус: ${activeStatus}\n` +
-      `📋 Подписка: ${user.subscriptionExpiresAt ? 'до ' + new Date(user.subscriptionExpiresAt!).toISOString().replace('T', ' ').slice(0, 19) : 'нет'}\n` +
+      `📋 Подписка: ${user.subscriptionExpiresAt ? 'до ' + this.formatMskDate(user.subscriptionExpiresAt!) : 'нет'}\n` +
       (blockedStatus ? `🚫 ${blockedStatus}\n` : '') +
-      `📅 Создан: ${user.createdAt?.toISOString().replace('T', ' ').slice(0, 19) || '—'}\n\n` +
+      `📅 Создан: ${user.createdAt?.toISOString().replace('T', ' ').slice(0, 19) || '—'}${peerInfo}\n\n` +
       `Выберите поле для редактирования:`;
 
     const buttons: any[][] = [
@@ -535,6 +539,9 @@ export class BotService {
         Markup.button.callback('💵 USDT', `ef_userBalanceUSDT_${user.id}`),
         Markup.button.callback('₿ BTC', `ef_userBalanceBTC_${user.id}`),
         Markup.button.callback('💎 GRAM', `ef_userBalanceGram_${user.id}`),
+      ],
+      [
+        Markup.button.callback('⚙️ Управление подпиской', `submgmt_${user.id}`),
       ],
       [
         user.role === 'admin'
@@ -562,6 +569,90 @@ export class BotService {
       parse_mode: 'Markdown',
       ...Markup.inlineKeyboard(buttons),
     });
+  }
+
+  // ─── MSK timezone helpers ─────────────────────────────────
+
+  private readonly MSK_OFFSET_MS = 3 * 3600_000;
+
+  /** Parse user-entered date string as MSK time, returns UTC Date */
+  parseMskDate(text: string): Date | null {
+    const clean = text.trim().replace(' ', 'T');
+    // If no timezone specified, treat as MSK (+03:00)
+    const withTz = clean.includes('+') || clean.includes('Z') || clean.endsWith('Z')
+      ? clean
+      : clean + '+03:00';
+    const d = new Date(withTz);
+    return isNaN(d.getTime()) ? null : d;
+  }
+
+  /** Format a UTC Date as MSK string for display */
+  formatMskDate(date: Date): string {
+    const msk = new Date(date.getTime() + this.MSK_OFFSET_MS);
+    return msk.toISOString().replace('T', ' ').slice(0, 19) + ' МСК';
+  }
+
+  // ─── Subscription management ───────────────────────────────
+
+  /** Show subscription management page (admin) */
+  async showSubscriptionManagement(ctx: Context, user: User) {
+    const peerInfo = user.amneziaPeerId
+      ? `🔐 VPN пир: \`${user.amneziaPeerId.slice(0, 8)}...\``
+      : '🔐 VPN пир: не создан';
+    const subInfo = user.subscriptionExpiresAt
+      ? `📋 Подписка до: **${this.formatMskDate(user.subscriptionExpiresAt)}**`
+      : '📋 Подписка: нет';
+
+    // Fetch client status from AmneziaWG
+    let clientEnabled = true;
+    if (user.amneziaPeerId) {
+      const clients = await this.amneziaService.listClients();
+      const c = clients.find((c) => c.id === user.amneziaPeerId);
+      clientEnabled = c?.enabled ?? true;
+    }
+
+    const statusText = user.amneziaPeerId
+      ? (clientEnabled ? '🟢 Клиент активен' : '🔴 Клиент отключён')
+      : '⚪ Клиент не создан';
+
+    const toggleLabel = clientEnabled
+      ? '🔴 Отключить клиента'
+      : '🟢 Включить клиента';
+
+    const message =
+      `⚙️ **Управление подпиской**\n\n` +
+      `${subInfo}\n` +
+      `${peerInfo}\n` +
+      `${statusText}\n\n` +
+      `Действия:`;
+
+    const buttons: any[][] = [];
+
+    if (user.amneziaPeerId) {
+      buttons.push([
+        Markup.button.callback(toggleLabel, `togclient_${user.id}_${clientEnabled ? 'disable' : 'enable'}`),
+      ]);
+    }
+
+    buttons.push([
+      Markup.button.callback('✏️ Изменить время подписки', `ef_subscriptionExpiresAt_${user.id}`),
+    ]);
+    buttons.push([Markup.button.callback('🔙 Назад', `edit_user_${user.telegramId}`)]);
+
+    await ctx.reply(message, {
+      parse_mode: 'Markdown',
+      ...Markup.inlineKeyboard(buttons),
+    });
+  }
+
+  /** Toggle AmneziaWG client enabled/disabled */
+  async toggleClient(userId: number, enable: boolean): Promise<boolean> {
+    const user = await this.userService.findById(userId);
+    if (!user?.amneziaPeerId) return false;
+
+    return enable
+      ? this.amneziaService.enableClient(user.amneziaPeerId)
+      : this.amneziaService.disableClient(user.amneziaPeerId);
   }
 
   /** Show VPN configuration page (download + QR + one-time link) */
@@ -716,31 +807,55 @@ export class BotService {
     return this.amneziaService.getOneTimeLink(peerId);
   }
 
+  /** Update subscription expiry — DB + AmneziaWG sync */
+  async updateSubscription(
+    userId: number,
+    newExpiry: Date,
+    oldUser: User,
+  ): Promise<{ synced: boolean }> {
+    await this.userService.update(userId, { subscriptionExpiresAt: newExpiry });
+
+    // Sync with AmneziaWG if user has a peer
+    let synced = false;
+    if (oldUser.amneziaPeerId) {
+      synced = await this.amneziaService.updateClientExpireDate(
+        oldUser.amneziaPeerId,
+        newExpiry.toISOString(),
+      );
+    }
+    return { synced };
+  }
+
   // ─── AmneziaWG VPN provisioning ────────────────────────────
 
   /** Ensure user has an AmneziaWG peer; create one and link it if not */
   async ensureUserHasPeer(user: User): Promise<string | null> {
-    // Return existing peer config if already provisioned
+    // Calculate remaining hours for AmneziaWG client expiry
+    const expireHours = user.subscriptionExpiresAt
+      ? Math.ceil((new Date(user.subscriptionExpiresAt).getTime() - Date.now()) / 3600_000)
+      : undefined;
+
+    // If existing peer, just fetch config (AmneziaWG expiry was set at creation)
     if (user.amneziaPeerId) {
       const config = await this.amneziaService.getClientConfig(user.amneziaPeerId);
       if (config) return config;
       // Peer might have been deleted on server — recreate
-      this.logger.warn(`Peer ${user.amneziaPeerId} not found on server, recreating...`);
+      this.logger.warn(`Client ${user.amneziaPeerId} not found on server, recreating...`);
     }
 
-    // Create new peer
-    const peerName = user.firstName || user.username || `user_${user.telegramId}`;
-    const peer = await this.amneziaService.createClient(peerName);
-    if (!peer) {
-      this.logger.error(`Failed to create peer for user ${user.telegramId}`);
+    // Create new peer with subscription-based expiry
+    const clientName = user.firstName || user.username || `user_${user.telegramId}`;
+    const client = await this.amneziaService.createClient(clientName, expireHours);
+    if (!client) {
+      this.logger.error(`Failed to create client for user ${user.telegramId}`);
       return null;
     }
 
-    // Link peer to user in DB
-    await this.userService.update(user.id, { amneziaPeerId: peer.id });
+    // Link client to user in DB
+    await this.userService.update(user.id, { amneziaPeerId: client.id });
 
     // Fetch config for the newly created client
-    return this.amneziaService.getClientConfig(peer.id);
+    return this.amneziaService.getClientConfig(client.id);
   }
 
   /** Provision VPN for a user after subscription activation */

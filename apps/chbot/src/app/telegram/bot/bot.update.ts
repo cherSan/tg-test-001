@@ -661,7 +661,7 @@ export class BotUpdate {
     const field = match[1];
     const userId = parseInt(match[2], 10);
 
-    const validFields = ['firstName', 'username', 'userBalanceUSDT', 'userBalanceBTC', 'userBalanceGram'];
+    const validFields = ['firstName', 'username', 'userBalanceUSDT', 'userBalanceBTC', 'userBalanceGram', 'subscriptionExpiresAt'];
     if (!validFields.includes(field)) {
       await ctx.reply('❌ Неизвестное поле для редактирования.');
       return;
@@ -673,11 +673,16 @@ export class BotUpdate {
       userBalanceUSDT: 'баланс USDT',
       userBalanceBTC: 'баланс BTC',
       userBalanceGram: 'баланс GRAM',
+      subscriptionExpiresAt: 'дата окончания подписки',
     };
+
+    const hint = field === 'subscriptionExpiresAt'
+      ? '\n(формат: `ГГГГ-ММ-ДД` или `ГГГГ-ММ-ДД ЧЧ:ММ`)'
+      : '';
 
     ctx.session.awaitingEditField = { userId, field };
     await ctx.reply(
-      `✏️ Введите новое значение для поля **${fieldLabels[field] || field}**:\n` +
+      `✏️ Введите новое значение для поля **${fieldLabels[field] || field}**:${hint}\n` +
       `(отправьте /cancel для отмены)`,
       { parse_mode: 'Markdown' },
     );
@@ -762,6 +767,52 @@ export class BotUpdate {
       { parse_mode: 'Markdown' },
     );
     await this.botService.showUserEditFields(ctx, (await this.userService.findById(userId))!);
+  }
+
+  /** Open subscription management for a user (admin) */
+  @Action(/^submgmt_(\d+)$/)
+  async onSubMgmt(@Ctx() ctx: Context) {
+    await ctx.answerCbQuery();
+    if (!this.checkAdmin(ctx)) return;
+
+    const match = (ctx as any).match;
+    const userId = parseInt(match[1], 10);
+    const user = await this.userService.findById(userId);
+
+    if (!user) {
+      await ctx.reply('❌ Пользователь не найден.');
+      return;
+    }
+
+    await this.botService.showSubscriptionManagement(ctx, user);
+  }
+
+  /** Toggle AmneziaWG client enable/disable (admin) */
+  @Action(/^togclient_(\d+)_(enable|disable)$/)
+  async onToggleClient(@Ctx() ctx: Context) {
+    await ctx.answerCbQuery();
+    if (!this.checkAdmin(ctx)) return;
+
+    const match = (ctx as any).match;
+    const userId = parseInt(match[1], 10);
+    const action = match[2] as 'enable' | 'disable';
+
+    const ok = await this.botService.toggleClient(userId, action === 'enable');
+    const user = await this.userService.findById(userId);
+
+    if (!user) {
+      await ctx.reply('❌ Пользователь не найден.');
+      return;
+    }
+
+    if (ok) {
+      const label = action === 'enable' ? 'включён' : 'отключён';
+      await ctx.answerCbQuery(`✅ Клиент ${label}`);
+    } else {
+      await ctx.answerCbQuery('❌ Не удалось изменить состояние клиента');
+    }
+
+    await this.botService.showSubscriptionManagement(ctx, user);
   }
 
   @Action(/^cancel_edit/)
@@ -1074,6 +1125,30 @@ export class BotUpdate {
     if (!user) {
       ctx.session.awaitingEditField = undefined;
       await ctx.reply('❌ Пользователь не найден.');
+      return;
+    }
+
+    // ── Subscription date: parse as MSK, update DB, sync with AmneziaWG ──
+    if (field === 'subscriptionExpiresAt') {
+      const parsed = this.botService.parseMskDate(text.trim());
+      if (!parsed) {
+        await ctx.reply('❌ Неверный формат даты. Пример: `2026-07-15` или `2026-07-15 18:24` (МСК)');
+        return;
+      }
+
+      const { synced } = await this.botService.updateSubscription(userId, parsed, user);
+      ctx.session.awaitingEditField = undefined;
+
+      const dateStr = this.botService.formatMskDate(parsed);
+      if (synced) {
+        await ctx.reply(`✅ Подписка обновлена до **${dateStr}**\n🔐 Синхронизировано с AmneziaWG`, { parse_mode: 'Markdown' });
+      } else if (user.amneziaPeerId) {
+        await ctx.reply(`✅ Подписка обновлена до **${dateStr}**\n⚠️ Не удалось синхронизировать с AmneziaWG`, { parse_mode: 'Markdown' });
+      } else {
+        await ctx.reply(`✅ Подписка обновлена до **${dateStr}**\nℹ️ VPN пир ещё не создан`, { parse_mode: 'Markdown' });
+      }
+
+      await this.botService.showUserEditFields(ctx, (await this.userService.findById(userId))!);
       return;
     }
 

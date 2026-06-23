@@ -205,18 +205,26 @@ export class BotService {
     const btc = user.userBalanceBTC?.toFixed(8) || '0.00000000';
     const gram = user.userBalanceGram?.toFixed(2) || '0.00';
 
+    const hasBalance = (user.userBalanceUSDT ?? 0) > 0
+                    || (user.userBalanceBTC ?? 0) > 0
+                    || (user.userBalanceGram ?? 0) > 0;
+
     const message =
       `💰 **Ваш баланс**\n\n` +
       `💵 USDT: **${usdt}**\n` +
       `₿  BTC: **${btc}**\n` +
       `💎 GRAM: **${gram}**`;
 
+    const buttons: any[][] = [];
+    if (hasBalance) {
+      buttons.push([Markup.button.callback('💳 Купить подписку', 'buy')]);
+    }
+    buttons.push([Markup.button.callback('💳 Пополнить баланс', 'top_up')]);
+    buttons.push([Markup.button.callback('🔙 Назад', 'show_menu')]);
+
     await ctx.reply(message, {
       parse_mode: 'Markdown',
-      ...Markup.inlineKeyboard([
-        [Markup.button.callback('💳 Пополнить баланс', 'top_up')],
-        [Markup.button.callback('🔙 Назад', 'show_menu')],
-      ]),
+      ...Markup.inlineKeyboard(buttons),
     });
   }
 
@@ -440,14 +448,19 @@ export class BotService {
     // Provision VPN
     const provisioned = await this.provisionVpnForUser(dbUser.id);
 
-    const expiryStr = newExpiry.toISOString().replace('T', ' ').slice(0, 19);
+    const expiryStr = this.formatMskDate(newExpiry);
+    const vpnButton = Markup.inlineKeyboard([
+      [Markup.button.callback('🔐 Конфигурации VPN', 'vpn_config')],
+      [Markup.button.callback('🔙 В меню', 'show_menu')],
+    ]);
+
     if (plan.usdt === 0) {
       if (provisioned) {
         await ctx.reply(
           `🎉 **${plan.label}** активирован!\n\n` +
           `✅ Подписка активна до **${expiryStr}**\n` +
-          `🔐 VPN-аккаунт создан. Используйте «Получить ссылку» или «Получить QR» для подключения.`,
-          { parse_mode: 'Markdown' },
+          `🔐 VPN-аккаунт создан:`,
+          { parse_mode: 'Markdown', ...vpnButton },
         );
       } else {
         await ctx.reply(
@@ -464,8 +477,8 @@ export class BotService {
           `💸 Списано: **${plan.usdt}** USDT\n` +
           `💰 Остаток: **${(dbUser.userBalanceUSDT - plan.usdt).toFixed(2)}** USDT\n` +
           `📅 Подписка активна до **${expiryStr}**\n` +
-          `🔐 VPN-аккаунт создан. Используйте «Получить ссылку» или «Получить QR» для подключения.`,
-          { parse_mode: 'Markdown' },
+          `🔐 VPN-аккаунт создан:`,
+          { parse_mode: 'Markdown', ...vpnButton },
         );
       } else {
         await ctx.reply(
@@ -917,13 +930,18 @@ export class BotService {
     // Provision VPN
     const provisioned = await this.provisionVpnForUser(dbUser.id);
 
-    const expiryStr = newExpiry.toISOString().replace('T', ' ').slice(0, 19);
+    const expiryStr = this.formatMskDate(newExpiry);
+    const vpnButton = Markup.inlineKeyboard([
+      [Markup.button.callback('🔐 Конфигурации VPN', 'vpn_config')],
+      [Markup.button.callback('🔙 В меню', 'show_menu')],
+    ]);
+
     if (provisioned) {
       await ctx.reply(
         `🎉 Спасибо за оплату!\n\n` +
         `✅ Подписка активирована до **${expiryStr}**\n` +
-        `🔐 VPN-аккаунт создан. Используйте «Получить ссылку» или «Получить QR» для подключения.`,
-        { parse_mode: 'Markdown' },
+        `🔐 VPN-аккаунт создан:`,
+        { parse_mode: 'Markdown', ...vpnButton },
       );
     } else {
       await ctx.reply(

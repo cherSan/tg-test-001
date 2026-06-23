@@ -37,9 +37,6 @@ export class BotService {
       ],
       [
         Markup.button.callback('💰 Баланс', 'balance'),
-        Markup.button.callback('💳 Купить подписку', 'buy'),
-      ],
-      [
         Markup.button.callback('📋 Мои подписки', 'my_subscription'),
       ],
     ];
@@ -214,7 +211,7 @@ export class BotService {
       `💵 USDT: **${usdt}**\n` +
       `₿  BTC: **${btc}**\n` +
       `💎 GRAM: **${gram}**\n\n` +
-      `Для пополнения нажмите «💳 Купить подписку» в меню.`;
+      `Для пополнения перейдите в «📋 Мои подписки».`;
 
     await ctx.reply(message, { parse_mode: 'Markdown' });
   }
@@ -232,6 +229,7 @@ export class BotService {
       ? new Date(user.subscriptionExpiresAt).toISOString().replace('T', ' ').slice(0, 19)
       : null;
 
+    const buyLabel = hasSub ? '💳 Продлить подписку' : '💳 Купить подписку';
     let message: string;
     if (hasSub && expires) {
       const now = new Date();
@@ -241,22 +239,25 @@ export class BotService {
         `📋 **Мои подписки**\n\n` +
         `✅ Подписка активна\n` +
         `📅 Истекает: ${expires}\n` +
-        `⏳ Осталось дней: **${daysLeft}**\n\n` +
-        `Продлите подписку через 💳 Купить подписку`;
+        `⏳ Осталось дней: **${daysLeft}**`;
     } else if (expires) {
       message =
         `📋 **Мои подписки**\n\n` +
         `❌ Подписка истекла\n` +
-        `📅 Истекла: ${expires}\n\n` +
-        `Купите новую подписку через 💳 Купить подписку`;
+        `📅 Истекла: ${expires}`;
     } else {
       message =
         `📋 **Мои подписки**\n\n` +
-        `❌ Нет активных подписок\n\n` +
-        `Купите подписку через 💳 Купить подписку`;
+        `❌ Нет активных подписок`;
     }
 
-    await ctx.reply(message, { parse_mode: 'Markdown' });
+    await ctx.reply(message, {
+      parse_mode: 'Markdown',
+      ...Markup.inlineKeyboard([
+        [Markup.button.callback(buyLabel, 'buy')],
+        [Markup.button.callback('🔙 Назад', 'show_menu')],
+      ]),
+    });
   }
 
   /** Fetch live BTC/USDT and GRAM/USDT rates from configured exchange */

@@ -69,6 +69,10 @@ export class User {
   @Column({ type: 'varchar', length: 64, nullable: true })
   amneziaPeerId?: string | null;
 
+  /** When the free trial was last activated (null = never) */
+  @Column({ type: 'datetime', nullable: true })
+  lastTrialAt!: Date | null;
+
   @CreateDateColumn()
   createdAt!: Date;
 

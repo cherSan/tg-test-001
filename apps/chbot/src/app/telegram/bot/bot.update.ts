@@ -291,10 +291,102 @@ export class BotUpdate {
     await ctx.reply('Доступные команды: /start, /help. Или просто отправьте текст.');
   }
 
-  @Settings()
-  async settings(@Ctx() ctx: Context) {
+  // ─── Keyboard button handlers ────────────────────────────
+
+@Hears('🔌 Подключить VPN')
+  async onKeyboardConnect(@Ctx() ctx: Context) {
     if (!(await this.checkActive(ctx))) return;
-    await ctx.reply('Доступные команды: /start, /help. Или просто отправьте текст.');
+    const tgUser = ctx.from!;
+    const dbUser = await this.userService.findByTelegramId(tgUser.id);
+    if (!dbUser) return;
+
+    const hasSub = await this.botService.hasActiveSubscription(dbUser);
+    if (hasSub) {
+      await this.botService.showProfile(ctx);
+    } else {
+      await this.botService.showBuySubscription(ctx);
+    }
+  }
+
+  @Hears('👤 Профиль')
+  async onKeyboardProfile(@Ctx() ctx: Context) {
+    if (!(await this.checkActive(ctx))) return;
+    const tgUser = ctx.from!;
+    const dbUser = await this.userService.findByTelegramId(tgUser.id);
+    if (!dbUser) return;
+
+    const keys = await this.botService.getUserKeys(dbUser.id);
+    const activeKeys = keys.filter((k) => k.subscriptionExpiresAt && new Date(k.subscriptionExpiresAt) > new Date());
+    const balance = (dbUser.userBalanceUSDT ?? 0).toFixed(2);
+
+    if (activeKeys.length > 0) {
+      // Has active keys → show subscription page
+      await this.botService.showMySubscription(ctx, dbUser);
+    } else {
+      // No active keys → show info + action buttons
+      const message =
+        `Уважаемый пользователь, у Вас сейчас нет действующих ключей, но Вы можете их оформить.\n\n` +
+        `💰 Ваш баланс: **${balance}** USDT\n\n` +
+        `Если Вы считаете, что это ошибка, для связи с поддержкой используйте Ваш ID: \`${tgUser.id}\``;
+
+      await ctx.reply(message, {
+        parse_mode: 'Markdown',
+        ...Markup.inlineKeyboard([
+          [Markup.button.callback('🔌 Оформить подписку', 'buy')],
+          [Markup.button.callback('💳 Пополнить баланс', 'top_up')],
+          [Markup.button.callback('🎁 Подарить подписку', 'gift_sub')],
+          [Markup.button.callback('👥 Пригласить друга', 'invite_friend')],
+        ]),
+      });
+    }
+  }
+
+  @Action('invite_friend')
+  async onInviteFriend(@Ctx() ctx: Context) {
+    await ctx.answerCbQuery();
+    await ctx.reply(
+      '👥 **Пригласить друга**\n\n' +
+      'Пригласите друга и получите бонусы!\n\n' +
+      '🚧 Раздел в разработке.',
+      { parse_mode: 'Markdown' },
+    );
+  }
+
+  @Action('gift_sub')
+  async onGiftSub(@Ctx() ctx: Context) {
+    await ctx.answerCbQuery();
+    await ctx.reply(
+      '🎁 **Подарить подписку**\n\n' +
+      'Вы можете подарить подписку другому пользователю.\n\n' +
+      '🚧 Раздел в разработке.',
+      { parse_mode: 'Markdown' },
+    );
+  }
+
+  @Hears('🎁 Реферальная программа')
+  async onKeyboardReferral(@Ctx() ctx: Context) {
+    if (!(await this.checkActive(ctx))) return;
+    await ctx.reply(
+      '🏆 **Реферальная программа**\n\n' +
+      'Пригласите друга и получите бонусы!\n\n' +
+      '🚧 Раздел в разработке.',
+      { parse_mode: 'Markdown' },
+    );
+  }
+
+  @Hears('ℹ️ Информация')
+  async onKeyboardInfo(@Ctx() ctx: Context) {
+    if (!(await this.checkActive(ctx))) return;
+    await ctx.reply(
+      'ℹ️ **Информация**\n\n' +
+      '🔐 Сервис AmneziaWG VPN\n' +
+      '💳 Оплата криптовалютой (BTC, USDT, GRAM)\n' +
+      '📅 Пробный период — 24 часа\n' +
+      '🔑 Поддержка нескольких ключей\n\n' +
+      'По вопросам: обратитесь к администратору.\n' +
+      'Команды: /start /menu /help',
+      { parse_mode: 'Markdown' },
+    );
   }
 
   @Hears('whoami')
@@ -444,8 +536,22 @@ export class BotUpdate {
     const match = (ctx as any).match;
     const depositId = parseInt(match[1], 10);
     try {
-      await this.depositService.confirm(depositId);
-      await ctx.reply('✅ Пополнение подтверждено, баланс зачислен.');
+      const deposit = await this.depositService.confirm(depositId);
+      const rawAmount = deposit.verifiedAmount ?? deposit.amount;
+
+      // Always credit in USDT (auto-convert if needed)
+      const usdtAmount = await this.botService.convertToUsdt(rawAmount, deposit.currency);
+      await this.userService.creditBalance(deposit.userId, 'USDT', usdtAmount);
+
+      if (deposit.currency === 'USDT') {
+        await ctx.reply(`✅ Пополнение подтверждено, +${usdtAmount.toFixed(2)} USDT зачислено на баланс.`);
+      } else {
+        await ctx.reply(
+          `✅ Пополнение подтверждено!\n` +
+          `${rawAmount} ${deposit.currency} → **${usdtAmount.toFixed(2)} USDT** по курсу.`,
+          { parse_mode: 'Markdown' },
+        );
+      }
     } catch {
       await ctx.reply('❌ Ошибка: пополнение не найдено.');
     }
@@ -466,33 +572,52 @@ export class BotUpdate {
     }
   }
 
-  /** Show VPN config page with download/QR options */
+  /** Show "Профиль" page */
   @Action('vpn_config')
   async onVpnConfig(@Ctx() ctx: Context) {
     await ctx.answerCbQuery();
     if (!(await this.checkActive(ctx))) return;
     if (!(await this.checkSubscription(ctx))) return;
-    await this.botService.showVpnConfig(ctx);
+    await this.botService.showProfile(ctx);
   }
 
-  @Action('get_link')
+  /** Show list of keys for config */
+  @Action('vpn_keys')
+  async onVpnKeys(@Ctx() ctx: Context) {
+    await ctx.answerCbQuery();
+    if (!(await this.checkActive(ctx))) return;
+    if (!(await this.checkSubscription(ctx))) return;
+    await this.botService.showVpnKeys(ctx);
+  }
+
+  /** Show actions for a specific key */
+  @Action(/^keycfg_(\d+)$/)
+  async onKeyConfig(@Ctx() ctx: Context) {
+    await ctx.answerCbQuery();
+    if (!(await this.checkActive(ctx))) return;
+    if (!(await this.checkSubscription(ctx))) return;
+
+    const match = (ctx as any).match;
+    const keyId = parseInt(match[1], 10);
+    await this.botService.showKeyActions(ctx, keyId);
+  }
+
+  @Action(/^getlink_(\d+)$/)
   async onGetLink(@Ctx() ctx: Context & { session: SessionData }) {
     this.safeAnswerCbQuery(ctx);
     const chatId = ctx.chat!.id;
     const tgUser = ctx.from!;
 
     if (!(await this.checkActive(ctx))) return;
-    if (!(await this.checkSubscription(ctx))) return;
     if (!this.checkConfigCooldown(ctx, tgUser.id, 'link')) return;
 
+    const match = (ctx as any).match;
+    const keyId = parseInt(match[1], 10);
 
-    const dbUser = await this.userService.findByTelegramId(tgUser.id);
-    if (!dbUser) {
-      await ctx.reply('❌ Пользователь не найден.');
-      return;
-    }
+    const key = await this.botService.getVpnKey(keyId);
+    if (!key) { await ctx.reply('❌ Ключ не найден.'); return; }
 
-    const config = await this.botService.ensureUserHasPeer(dbUser);
+    const config = await this.botService.getKeyConfig(key);
     if (!config) {
       await ctx.reply('❌ Не удалось получить конфигурацию VPN.');
       return;
@@ -502,29 +627,27 @@ export class BotUpdate {
       'sendDocument',
       chatId,
       Buffer.from(config, 'utf-8'),
-      `amnezia_${dbUser.telegramId}.conf`,
-      '🔐 Ваш конфигурационный файл AmneziaWG',
+      `amnezia_key${key.keyIndex}.conf`,
+      `🔐 Key${key.keyIndex} — конфигурация AmneziaWG`,
     );
   }
 
-  @Action('get_qr')
+  @Action(/^getqr_(\d+)$/)
   async onGetQR(@Ctx() ctx: Context & { session: SessionData }) {
     this.safeAnswerCbQuery(ctx);
     const chatId = ctx.chat!.id;
     const tgUser = ctx.from!;
 
     if (!(await this.checkActive(ctx))) return;
-    if (!(await this.checkSubscription(ctx))) return;
     if (!this.checkConfigCooldown(ctx, tgUser.id, 'qr')) return;
 
+    const match = (ctx as any).match;
+    const keyId = parseInt(match[1], 10);
 
-    const dbUser = await this.userService.findByTelegramId(tgUser.id);
-    if (!dbUser) {
-      await ctx.reply('❌ Пользователь не найден.');
-      return;
-    }
+    const key = await this.botService.getVpnKey(keyId);
+    if (!key) { await ctx.reply('❌ Ключ не найден.'); return; }
 
-    const config = await this.botService.ensureUserHasPeer(dbUser);
+    const config = await this.botService.getKeyConfig(key);
     if (!config) {
       await ctx.reply('❌ Не удалось получить конфигурацию VPN.');
       return;
@@ -535,35 +658,29 @@ export class BotUpdate {
       'sendPhoto',
       chatId,
       qrBuffer,
-      `amnezia_qr_${dbUser.telegramId}.png`,
-      '📱 Отсканируйте QR-код в приложении AmneziaWG',
+      `amnezia_key${key.keyIndex}.png`,
+      `📱 Key${key.keyIndex} — отсканируйте QR-код`,
     );
   }
 
-  @Action('onetimelink')
+  @Action(/^otlink_(\d+)$/)
   async onOneTimeLink(@Ctx() ctx: Context & { session: SessionData }) {
     this.safeAnswerCbQuery(ctx);
     const chatId = ctx.chat!.id;
     const tgUser = ctx.from!;
 
     if (!(await this.checkActive(ctx))) return;
-    if (!(await this.checkSubscription(ctx))) return;
     if (!this.checkConfigCooldown(ctx, tgUser.id, 'onetime')) return;
 
-    const dbUser = await this.userService.findByTelegramId(tgUser.id);
-    if (!dbUser) {
-      await ctx.reply('❌ Пользователь не найден.');
-      return;
-    }
+    const match = (ctx as any).match;
+    const keyId = parseInt(match[1], 10);
 
-    if (!dbUser.amneziaPeerId) {
-      await ctx.reply('❌ VPN-аккаунт не найден. Сначала активируйте подписку.');
-      return;
-    }
+    const key = await this.botService.getVpnKey(keyId);
+    if (!key) { await ctx.reply('❌ Ключ не найден.'); return; }
 
     await ctx.reply('⏳ Генерирую одноразовую ссылку...');
 
-    const link = await this.botService.getOneTimeLink(dbUser.amneziaPeerId);
+    const link = await this.botService.getOneTimeLink(keyId);
     if (!link) {
       await ctx.reply('❌ Не удалось создать одноразовую ссылку.');
       return;
@@ -571,9 +688,9 @@ export class BotUpdate {
 
     await ctx.telegram.sendMessage(
       chatId,
-      `🔗 **Одноразовая ссылка на конфигурацию**\n\n` +
+      `🔗 **Key${key.keyIndex} — одноразовая ссылка**\n\n` +
       `[Скачать конфигурацию](${link})\n\n` +
-      `⚠️ Ссылка действительна **однократно** и ограничена по времени.`,
+      `⚠️ Ссылка действительна **однократно**.`,
       { parse_mode: 'Markdown', link_preview_options: { is_disabled: true } },
     );
   }
@@ -937,6 +1054,12 @@ export class BotUpdate {
         return;
       }
 
+      // ── Skip keyboard button texts (handled by @Hears) ─────
+      const keyboardButtons = ['🔌 Подключить VPN', '👤 Профиль', '🎁 Реферальная программа', 'ℹ️ Информация'];
+      if (keyboardButtons.includes(text)) {
+        return;
+      }
+
       // ── Echo for regular text ───────────────────────────────
       const replyText = this.botService.processText(text);
       await ctx.reply(replyText);
@@ -1031,18 +1154,9 @@ export class BotUpdate {
     const tgUser = ctx.from!;
     const currency = ctx.session.depositFlow!.currency!;
 
-    // Parse: "<txId> <amount>"
-    const parts = text.trim().split(/\s+/);
-    if (parts.length < 2) {
-      await ctx.reply('❌ Неверный формат. Введите TxID и сумму через пробел.\nПример: `abc123... 0.005`');
-      return;
-    }
-
-    const txId = parts[0];
-    const amount = parseFloat(parts[1]);
-
-    if (isNaN(amount) || amount <= 0) {
-      await ctx.reply('❌ Сумма должна быть положительным числом. Попробуйте снова.');
+    const txId = text.trim();
+    if (!txId || txId.length < 4) {
+      await ctx.reply('❌ Введите корректный TxID транзакции.');
       return;
     }
 
@@ -1054,10 +1168,10 @@ export class BotUpdate {
       return;
     }
 
-    // For BTC: verify against blockchain
+    // For BTC: verify against blockchain, get amount from chain
     if (currency === 'BTC') {
       await ctx.reply('🔍 Проверяю транзакцию в блокчейне...');
-      const result = await this.botService.verifyBtcDeposit(txId, amount);
+      const result = await this.botService.verifyBtcDeposit(txId, 0); // amount=0: accept any
 
       if (!result.success) {
         ctx.session.depositFlow = undefined;
@@ -1065,39 +1179,42 @@ export class BotUpdate {
         return;
       }
 
-      // Auto-confirm BTC deposit
       ctx.session.depositFlow = undefined;
       const dbUser = await this.userService.findByTelegramId(tgUser.id);
+
+      // Convert BTC to USDT
+      const usdtAmount = await this.botService.convertToUsdt(result.verifiedAmount!, 'BTC');
+
       await this.depositService.create({
         userId: dbUser!.id,
         txId,
         currency,
-        amount,
-        verifiedAmount: result.verifiedAmount,
+        amount: result.verifiedAmount!,
+        verifiedAmount: result.verifiedAmount!,
         status: 'confirmed',
       });
-      await this.userService.creditBalance(dbUser!.id, currency, result.verifiedAmount!);
+      await this.userService.creditBalance(dbUser!.id, 'USDT', usdtAmount);
       await ctx.reply(
         `✅ Пополнение подтверждено!\n` +
-        `+**${result.verifiedAmount!.toFixed(8)} BTC** зачислено на баланс.`,
+        `+**${result.verifiedAmount!.toFixed(8)} BTC** → **${usdtAmount.toFixed(2)} USDT** зачислено на баланс.`,
         { parse_mode: 'Markdown' },
       );
       return;
     }
 
-    // For USDT/GRAM: store as pending for admin review
+    // For USDT/GRAM: store as pending for admin review (amount TBD from blockchain)
     ctx.session.depositFlow = undefined;
     const dbUser = await this.userService.findByTelegramId(tgUser.id);
     await this.depositService.create({
       userId: dbUser!.id,
       txId,
       currency,
-      amount,
+      amount: 0, // will be updated by admin after verification
       status: 'pending',
     });
 
     await ctx.reply(
-      `⏳ Пополнение **${amount} ${currency}** отправлено на проверку администратору.\n` +
+      `⏳ Пополнение **${currency}** отправлено на проверку администратору.\n` +
       `TxID: \`${txId}\`\n\n` +
       `Баланс будет зачислен после подтверждения.`,
       { parse_mode: 'Markdown' },
@@ -1110,7 +1227,7 @@ export class BotUpdate {
       try {
         await ctx.telegram.sendMessage(
           admin.telegramId,
-          `💳 **Новое пополнение**\n👤 ${name}\n💰 ${amount} ${currency}\n🔗 \`${txId}\``,
+          `💳 **Новое пополнение**\n👤 ${name}\n💰 ${currency}\n🔗 \`${txId}\``,
           { parse_mode: 'Markdown' },
         );
       } catch (_) {}
@@ -1128,26 +1245,13 @@ export class BotUpdate {
       return;
     }
 
-    // ── Subscription date: parse as MSK, update DB, sync with AmneziaWG ──
+    // ── Subscription date: redirect to key management ──
     if (field === 'subscriptionExpiresAt') {
-      const parsed = this.botService.parseMskDate(text.trim());
-      if (!parsed) {
-        await ctx.reply('❌ Неверный формат даты. Пример: `2026-07-15` или `2026-07-15 18:24` (МСК)');
-        return;
-      }
-
-      const { synced } = await this.botService.updateSubscription(userId, parsed, user);
+      await ctx.reply(
+        'ℹ️ Для управления подпиской используйте **⚙️ Управление подпиской** в карточке пользователя.',
+        { parse_mode: 'Markdown' },
+      );
       ctx.session.awaitingEditField = undefined;
-
-      const dateStr = this.botService.formatMskDate(parsed);
-      if (synced) {
-        await ctx.reply(`✅ Подписка обновлена до **${dateStr}**\n🔐 Синхронизировано с AmneziaWG`, { parse_mode: 'Markdown' });
-      } else if (user.amneziaPeerId) {
-        await ctx.reply(`✅ Подписка обновлена до **${dateStr}**\n⚠️ Не удалось синхронизировать с AmneziaWG`, { parse_mode: 'Markdown' });
-      } else {
-        await ctx.reply(`✅ Подписка обновлена до **${dateStr}**\nℹ️ VPN пир ещё не создан`, { parse_mode: 'Markdown' });
-      }
-
       await this.botService.showUserEditFields(ctx, (await this.userService.findById(userId))!);
       return;
     }
@@ -1280,7 +1384,7 @@ export class BotUpdate {
     if (!tgUser) return false;
     const dbUser = await this.userService.findByTelegramId(tgUser.id);
     if (!dbUser || !this.botService.hasActiveSubscription(dbUser)) {
-      await ctx.reply('🔒 Эта функция доступна только с активной подпиской.\nКупите подписку через 💳 Купить подписку.');
+      await ctx.reply('🔒 Эта функция доступна только с активной подпиской.\nОформите подписку через 🔌 Оформить подписку.');
       return false;
     }
     return true;

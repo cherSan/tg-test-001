@@ -5,9 +5,10 @@ import {TestWizard} from "./test.wizzard";
 import {RandomNumberScene} from "./test.scene";
 import {DBModule} from "../../db/db.module";
 import {AmneziaModule} from "../../amnezia/amnezia.module";
+import { CommandsService } from '../commands.service';
 
 @Module({
   imports: [DBModule, AmneziaModule],
-  providers: [BotUpdate, BotService, TestWizard, RandomNumberScene],
+  providers: [BotUpdate, BotService, TestWizard, RandomNumberScene, CommandsService],
 })
 export class BotModule {}

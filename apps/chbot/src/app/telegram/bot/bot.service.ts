@@ -4,6 +4,8 @@ import { UserService } from '../../db/user.service';
 import { User } from '../../db/entities/user.entity';
 import { DepositService } from '../../db/deposit.service';
 import { Deposit } from '../../db/entities/deposit.entity';
+import { VpnKeyService } from '../../db/vpn-key.service';
+import { VpnKey } from '../../db/entities/vpn-key.entity';
 import { AmneziaService } from '../../amnezia/amnezia.service';
 
 @Injectable()
@@ -17,6 +19,7 @@ export class BotService {
     private readonly userService: UserService,
     private readonly depositService: DepositService,
     private readonly amneziaService: AmneziaService,
+    private readonly vpnKeyService: VpnKeyService,
   ) {}
 
   getWelcomeMessage(username: string): string {
@@ -33,7 +36,7 @@ export class BotService {
 
     // Check subscription for feature gating
     const dbUser = tgUser ? await this.userService.findByTelegramId(tgUser.id) : null;
-    const hasSub = dbUser ? this.hasActiveSubscription(dbUser) : false;
+    const hasSub = dbUser ? await this.hasActiveSubscription(dbUser) : false;
 
     const buttons: any[][] = [
       [
@@ -67,21 +70,13 @@ export class BotService {
   }
 
   async botMenu(ctx: Context) {
-    const tgUser = ctx.from;
-    const isAdmin = tgUser ? this.userService.isAdmin(tgUser.id) : false;
-
-    const buttons: any[][] = [
-      ['/start', '/menu'],
-      ['/help', '/settings'],
-    ];
-
-    if (isAdmin) {
-      buttons.push(['/seeusers']);
-    }
-
     await ctx.reply(
-      'I activate personal commands for you.',
-      Markup.keyboard(buttons).resize().persistent(),
+      'Используйте кнопки меню для навигации:',
+      Markup.keyboard([
+        ['🔌 Подключить VPN'],
+        ['👤 Профиль', '🎁 Реферальная программа'],
+        ['ℹ️ Информация'],
+      ]).resize().persistent(),
     );
   }
 
@@ -199,25 +194,17 @@ export class BotService {
     });
   }
 
-  /** Show user's balances */
+  /** Show user's balance (USDT only — all deposits auto-converted) */
   async showUserBalance(ctx: Context, user: User) {
-    const usdt = user.userBalanceUSDT?.toFixed(2) || '0.00';
-    const btc = user.userBalanceBTC?.toFixed(8) || '0.00000000';
-    const gram = user.userBalanceGram?.toFixed(2) || '0.00';
-
-    const hasBalance = (user.userBalanceUSDT ?? 0) > 0
-                    || (user.userBalanceBTC ?? 0) > 0
-                    || (user.userBalanceGram ?? 0) > 0;
+    const usdt = (user.userBalanceUSDT ?? 0).toFixed(2);
 
     const message =
       `💰 **Ваш баланс**\n\n` +
-      `💵 USDT: **${usdt}**\n` +
-      `₿  BTC: **${btc}**\n` +
-      `💎 GRAM: **${gram}**`;
+      `💵 **${usdt}** USDT`;
 
     const buttons: any[][] = [];
-    if (hasBalance) {
-      buttons.push([Markup.button.callback('💳 Купить подписку', 'buy')]);
+    if ((user.userBalanceUSDT ?? 0) > 0) {
+      buttons.push([Markup.button.callback('🔌 Оформить подписку', 'buy')]);
     }
     buttons.push([Markup.button.callback('💳 Пополнить баланс', 'top_up')]);
     buttons.push([Markup.button.callback('🔙 Назад', 'show_menu')]);
@@ -228,49 +215,48 @@ export class BotService {
     });
   }
 
-  /** Check if user has an active (non-expired) subscription */
-  hasActiveSubscription(user: User): boolean {
-    if (!user.subscriptionExpiresAt) return false;
-    return new Date(user.subscriptionExpiresAt) > new Date();
+  /** Check if user has at least one active key */
+  async hasActiveSubscription(user: User): Promise<boolean> {
+    const keys = await this.vpnKeyService.findByUserId(user.id);
+    const now = new Date();
+    return keys.some((k) => k.subscriptionExpiresAt && new Date(k.subscriptionExpiresAt) > now);
   }
 
-  /** Show user's current subscription status */
+  /** Show user's current subscription status (list of keys) */
   async showMySubscription(ctx: Context, user: User) {
-    const hasSub = this.hasActiveSubscription(user);
-    const expires = user.subscriptionExpiresAt
-      ? new Date(user.subscriptionExpiresAt).toISOString().replace('T', ' ').slice(0, 19)
-      : null;
+    const keys = await this.vpnKeyService.findByUserId(user.id);
+    const now = new Date();
 
-    const buyLabel = hasSub ? '💳 Продлить подписку' : '💳 Купить подписку';
+    // Clean up expired peers
+    for (const key of keys) {
+      if (key.subscriptionExpiresAt && new Date(key.subscriptionExpiresAt) <= now) {
+        await this.cleanupKey(key);
+      }
+    }
+
+    // Refresh keys after cleanup
+    const activeKeys = (await this.vpnKeyService.findByUserId(user.id))
+      .filter((k) => k.subscriptionExpiresAt && new Date(k.subscriptionExpiresAt) > now);
+
     let message: string;
-    if (hasSub && expires) {
-      const now = new Date();
-      const expDate = new Date(user.subscriptionExpiresAt!);
-      const daysLeft = Math.ceil((expDate.getTime() - now.getTime()) / (1000 * 60 * 60 * 24));
-      message =
-        `📋 **Мои подписки**\n\n` +
-        `✅ Подписка активна\n` +
-        `📅 Истекает: ${expires}\n` +
-        `⏳ Осталось дней: **${daysLeft}**`;
-    } else if (expires) {
-      message =
-        `📋 **Мои подписки**\n\n` +
-        `❌ Подписка истекла\n` +
-        `📅 Истекла: ${expires}`;
+    if (activeKeys.length > 0) {
+      let keysText = '';
+      for (const k of activeKeys) {
+        const daysLeft = Math.ceil((new Date(k.subscriptionExpiresAt!).getTime() - now.getTime()) / 86400_000);
+        keysText += `🔑 Key${k.keyIndex}: ✅ до **${this.formatMskDate(k.subscriptionExpiresAt!)}** (${daysLeft} дн.)\n`;
+      }
+      message = `📋 **Мои подписки**\n\n${keysText}`;
     } else {
-      message =
-        `📋 **Мои подписки**\n\n` +
-        `❌ Нет активных подписок`;
+      message = `📋 **Мои подписки**\n\n❌ Нет активных ключей`;
     }
 
     const buttons: any[][] = [
-      [Markup.button.callback(buyLabel, 'buy')],
+      [Markup.button.callback('🔌 Оформить подписку', 'buy')],
       [Markup.button.callback('💳 Пополнить баланс', 'top_up')],
     ];
 
-    // Show VPN config button only if user has active subscription
-    if (hasSub) {
-      buttons.push([Markup.button.callback('🔐 Конфигурации VPN', 'vpn_config')]);
+    if (activeKeys.length > 0) {
+      buttons.push([Markup.button.callback('🔐 Профиль', 'vpn_config')]);
     }
 
     buttons.push([Markup.button.callback('🔙 Назад', 'show_menu')]);
@@ -281,37 +267,37 @@ export class BotService {
     });
   }
 
-  /** Fetch live BTC/USDT and GRAM/USDT rates from configured exchange */
+  /** Fetch live BTC/USDT and/or GRAM/USDT rates from configured exchange (only enabled currencies) */
   async fetchCoinExRates(): Promise<{ btcUsdt: number; tonUsdt: number; exchange: string }> {
     const exchange = (process.env.EXCHANGE_API || 'coinex').toLowerCase();
+    const enableBtc = process.env.ENABLE_BTC_PAYMENT !== 'false';
+    const enableGram = process.env.ENABLE_GRAM_PAYMENT !== 'false';
 
     try {
       if (exchange === 'binance') {
-        const [btcRes, tonRes] = await Promise.all([
-          fetch('https://api.binance.com/api/v3/ticker/price?symbol=BTCUSDT'),
-          fetch('https://api.binance.com/api/v3/ticker/price?symbol=TONUSDT'),
-        ]);
-        const btcData = await btcRes.json() as any;
-        const tonData = await tonRes.json() as any;
-        return {
-          btcUsdt: parseFloat(btcData?.price) || 0,
-          tonUsdt: parseFloat(tonData?.price) || 0,
-          exchange: 'Binance',
-        };
+        const fetches: Promise<any>[] = [];
+        if (enableBtc) fetches.push(fetch('https://api.binance.com/api/v3/ticker/price?symbol=BTCUSDT').then(r => r.json()));
+        if (enableGram) fetches.push(fetch('https://api.binance.com/api/v3/ticker/price?symbol=TONUSDT').then(r => r.json()));
+
+        const results = await Promise.all(fetches);
+        let btcUsdt = 0, tonUsdt = 0, idx = 0;
+        if (enableBtc) btcUsdt = parseFloat(results[idx++]?.price) || 0;
+        if (enableGram) tonUsdt = parseFloat(results[idx++]?.price) || 0;
+
+        return { btcUsdt, tonUsdt, exchange: 'Binance' };
       }
 
       // Default: CoinEx v1
-      const [btcRes, gramRes] = await Promise.all([
-        fetch('https://api.coinex.com/v1/market/ticker?market=BTCUSDT'),
-        fetch('https://api.coinex.com/v1/market/ticker?market=GRAMUSDT'),
-      ]);
-      const btcData = await btcRes.json() as any;
-      const gramData = await gramRes.json() as any;
-      return {
-        btcUsdt: parseFloat(btcData?.data?.ticker?.last) || 0,
-        tonUsdt: parseFloat(gramData?.data?.ticker?.last) || 0,
-        exchange: 'CoinEx',
-      };
+      const fetches: Promise<any>[] = [];
+      if (enableBtc) fetches.push(fetch('https://api.coinex.com/v1/market/ticker?market=BTCUSDT').then(r => r.json()));
+      if (enableGram) fetches.push(fetch('https://api.coinex.com/v1/market/ticker?market=GRAMUSDT').then(r => r.json()));
+
+      const results = await Promise.all(fetches);
+      let btcUsdt = 0, tonUsdt = 0, idx = 0;
+      if (enableBtc) btcUsdt = parseFloat(results[idx++]?.data?.ticker?.last) || 0;
+      if (enableGram) tonUsdt = parseFloat(results[idx++]?.data?.ticker?.last) || 0;
+
+      return { btcUsdt, tonUsdt, exchange: 'CoinEx' };
     } catch {
       return { btcUsdt: 0, tonUsdt: 0, exchange: exchange };
     }
@@ -319,17 +305,21 @@ export class BotService {
 
   /** Calculate subscription plan prices from env */
   getSubscriptionPlans(rates: { btcUsdt: number; tonUsdt: number }) {
+    const trialHours = parseInt(process.env.TRIAL_TIME || '24', 10) || 24;
     const plans = [
-      { label: '🆓 Пробный', hours: 24, usdt: parseFloat(process.env.SUBSCRIPTION_24H_USDT || '0') },
+      { label: '🆓 Пробный', hours: trialHours, usdt: parseFloat(process.env.SUBSCRIPTION_24H_USDT || '0') },
       { label: '📅 7 дней', hours: 168, usdt: parseFloat(process.env.SUBSCRIPTION_7D_USDT || '5') },
       { label: '📅 14 дней', hours: 336, usdt: parseFloat(process.env.SUBSCRIPTION_14D_USDT || '13.5') },
       { label: '📅 1 месяц', hours: 720, usdt: parseFloat(process.env.SUBSCRIPTION_30D_USDT || '22.5') },
       { label: '📅 6 месяцев', hours: 4320, usdt: parseFloat(process.env.SUBSCRIPTION_180D_USDT || '90') },
     ];
 
+    const enableBtc = process.env.ENABLE_BTC_PAYMENT !== 'false';
+    const enableGram = process.env.ENABLE_GRAM_PAYMENT !== 'false';
+
     return plans.map((p) => {
-      const btc = rates.btcUsdt > 0 ? +(p.usdt / rates.btcUsdt).toFixed(8) : null;
-      const gram = rates.tonUsdt > 0 ? +(p.usdt / rates.tonUsdt).toFixed(2) : null;
+      const btc = (enableBtc && rates.btcUsdt > 0) ? +(p.usdt / rates.btcUsdt).toFixed(8) : null;
+      const gram = (enableGram && rates.tonUsdt > 0) ? +(p.usdt / rates.tonUsdt).toFixed(2) : null;
       return { ...p, btc, gram };
     });
   }
@@ -343,24 +333,40 @@ export class BotService {
     const rates = await this.fetchCoinExRates();
     const plans = this.getSubscriptionPlans(rates);
 
-    // Build plans table
+    // Build plans table with only enabled currencies
     let plansText = '';
     for (const p of plans) {
       const btcStr = p.btc !== null ? `~${p.btc} BTC` : '';
       const gramStr = p.gram !== null ? `~${p.gram} GRAM` : '';
       const altStr = [btcStr, gramStr].filter(Boolean).join(' / ');
+      const altPart = altStr ? ` (${altStr})` : '';
       if (p.usdt === 0) {
         plansText += `${p.label}: **Бесплатно**\n`;
       } else {
-        plansText += `${p.label}: **${p.usdt}** USDT${altStr ? ` (${altStr})` : ''}\n`;
+        plansText += `${p.label}: **${p.usdt}** USDT${altPart}\n`;
       }
     }
 
+    // Trial availability info
+    let trialInfo = '';
+    if (dbUser?.lastTrialAt) {
+      const nextTrialAt = new Date(dbUser.lastTrialAt.getTime() + 60 * 24 * 3600_000);
+      if (nextTrialAt > new Date()) {
+        trialInfo = `⏳ Пробный период будет снова доступен с **${this.formatMskDate(nextTrialAt)}**\n`;
+      } else {
+        trialInfo = `✅ Пробный период доступен!\n`;
+      }
+    } else {
+      trialInfo = `✅ Пробный период доступен!\n`;
+    }
+
     const message =
-      `💳 **Покупка подписки**\n\n` +
-      `Тарифы:\n${plansText}\n` +
+      `🔌 **Оформление подписки**\n\n` +
       `💰 Ваш баланс: **${balance.toFixed(2)}** USDT\n\n` +
-      `Выберите тариф (средства спишутся с баланса):`;
+      `Тарифы:\n${plansText}\n` +
+      trialInfo +
+      `\nℹ️ Пробный период — раз в 2 месяца.\n\n` +
+      `Выберите тариф:`;
 
     // Build plan buttons
     const planButtons: any[][] = plans.map((p) => {
@@ -370,6 +376,7 @@ export class BotService {
       return [Markup.button.callback(label, `buyplan_${p.hours}`)];
     });
 
+    planButtons.push([Markup.button.callback('💳 Пополнить баланс', 'top_up')]);
     planButtons.push([Markup.button.callback('🔙 Назад', 'my_subscription')]);
 
     await ctx.reply(message, {
@@ -378,19 +385,23 @@ export class BotService {
     });
   }
 
-  /** Show top-up page with payment addresses */
+  /** Show top-up page with payment addresses (filtered by env) */
   async showTopUpBalance(ctx: Context) {
     const usdtAddr = process.env.USDT_PAYMENT_ADDRESS || 'не задан';
     const btcAddr = process.env.BTC_PAYMENT_ADDRESS || 'не задан';
     const gramAddr = process.env.GRAM_PAYMENT_ADDRESS || 'не задан';
+    const enableBtc = process.env.ENABLE_BTC_PAYMENT !== 'false';
+    const enableGram = process.env.ENABLE_GRAM_PAYMENT !== 'false';
+
+    let addrText = `💵 USDT: \`${usdtAddr}\`\n`;
+    if (enableBtc) addrText += `₿  BTC: \`${btcAddr}\`\n`;
+    if (enableGram) addrText += `💎 GRAM: \`${gramAddr}\`\n`;
 
     const message =
       `💳 **Пополнение баланса**\n\n` +
       `Отправьте криптовалюту на один из адресов:\n\n` +
-      `💵 USDT: \`${usdtAddr}\`\n` +
-      `₿  BTC: \`${btcAddr}\`\n` +
-      `💎 GRAM: \`${gramAddr}\`\n\n` +
-      `После отправки нажмите «✅ Я оплатил» и укажите детали транзакции.`;
+      addrText +
+      `\nПосле отправки нажмите «✅ Я оплатил» и укажите TxID.`;
 
     await ctx.reply(message, {
       parse_mode: 'Markdown',
@@ -399,6 +410,66 @@ export class BotService {
         [Markup.button.callback('🔙 Назад', 'show_menu')],
       ]),
     });
+  }
+
+  /** Get enabled currencies based on env settings */
+  getEnabledCurrencies(): string[] {
+    const list = ['USDT'];
+    if (process.env.ENABLE_BTC_PAYMENT !== 'false') list.push('BTC');
+    if (process.env.ENABLE_GRAM_PAYMENT !== 'false') list.push('GRAM');
+    return list;
+  }
+
+  /** Clean up a single expired key */
+  async cleanupKey(key: VpnKey): Promise<void> {
+    this.logger.log(`Cleaning up expired key ${key.keyIndex} (peer=${key.peerId})`);
+    await this.amneziaService.deleteClient(key.peerId);
+    await this.vpnKeyService.delete(key.id);
+  }
+
+  // ─── Key provisioning ─────────────────────────────────────
+
+  /** Create a new key for user: AmneziaWG client + VpnKey record */
+  async provisionKey(user: User, expireHours: number): Promise<{ key: VpnKey; config: string } | null> {
+    const index = await this.vpnKeyService.getNextIndex(user.id);
+    const clientName = `${user.firstName || user.username || `user_${user.telegramId}`} Key${index}`;
+
+    const client = await this.amneziaService.createClient(clientName, expireHours);
+    if (!client) {
+      this.logger.error(`Failed to create AmneziaWG client for ${user.telegramId} Key${index}`);
+      return null;
+    }
+
+    const expiry = new Date(Date.now() + expireHours * 3600_000);
+    const key = await this.vpnKeyService.create({
+      userId: user.id,
+      keyIndex: index,
+      peerId: client.id,
+      subscriptionExpiresAt: expiry,
+    });
+
+    const config = await this.amneziaService.getClientConfig(client.id);
+    if (!config) {
+      this.logger.error(`Failed to get config for Key${index}`);
+      return null;
+    }
+
+    return { key, config };
+  }
+
+  /** Get config for an existing key */
+  async getKeyConfig(key: VpnKey): Promise<string | null> {
+    return this.amneziaService.getClientConfig(key.peerId);
+  }
+
+  /** Get a VpnKey by id */
+  async getVpnKey(keyId: number): Promise<VpnKey | null> {
+    return this.vpnKeyService.findById(keyId);
+  }
+
+  /** Get all keys for a user */
+  async getUserKeys(userId: number): Promise<VpnKey[]> {
+    return this.vpnKeyService.findByUserId(userId);
   }
 
   /** Purchase a subscription plan with balance */
@@ -418,12 +489,29 @@ export class BotService {
       return false;
     }
 
+    // ── Free trial (24h): check 2-month cooldown ──
+    const TRIAL_COOLDOWN_MS = 60 * 24 * 3600_000; // 60 days
+    if (plan.usdt === 0 && dbUser.lastTrialAt) {
+      const nextTrialAt = new Date(dbUser.lastTrialAt.getTime() + TRIAL_COOLDOWN_MS);
+      if (nextTrialAt > new Date()) {
+        const availableAt = this.formatMskDate(nextTrialAt);
+        await ctx.reply(
+          `❌ Пробный период уже был активирован.\n\n` +
+          `📅 Последний триал: **${this.formatMskDate(dbUser.lastTrialAt)}**\n` +
+          `⏳ Следующий доступен с: **${availableAt}**\n\n` +
+          `💡 Вы можете оплатить любой тариф с баланса прямо сейчас.`,
+          { parse_mode: 'Markdown' },
+        );
+        return false;
+      }
+    }
+
     // Check balance (skip for free plans)
-    if (plan.usdt > 0 && dbUser.userBalanceUSDT < plan.usdt) {
+    if (plan.usdt > 0 && (dbUser.userBalanceUSDT ?? 0) < plan.usdt) {
       await ctx.reply(
         `❌ Недостаточно средств!\n\n` +
         `Тариф: **${plan.usdt}** USDT\n` +
-        `Ваш баланс: **${dbUser.userBalanceUSDT.toFixed(2)}** USDT\n\n` +
+        `Ваш баланс: **${(dbUser.userBalanceUSDT ?? 0).toFixed(2)}** USDT\n\n` +
         `Пополните баланс через «💳 Пополнить баланс».`,
         { parse_mode: 'Markdown' },
       );
@@ -432,64 +520,56 @@ export class BotService {
 
     // Deduct from balance
     if (plan.usdt > 0) {
-      const newBalance = dbUser.userBalanceUSDT - plan.usdt;
+      const newBalance = (dbUser.userBalanceUSDT ?? 0) - plan.usdt;
       await this.userService.update(dbUser.id, { userBalanceUSDT: newBalance });
     }
 
-    // Set subscription expiry
-    const now = new Date();
-    const base = dbUser.subscriptionExpiresAt && dbUser.subscriptionExpiresAt > now
-      ? new Date(dbUser.subscriptionExpiresAt)
-      : now;
-    const newExpiry = new Date(base.getTime() + planHours * 3600 * 1000);
+    // Record trial usage
+    if (plan.usdt === 0) {
+      const now = new Date();
+      await this.userService.update(dbUser.id, { lastTrialAt: now });
+    }
 
-    await this.userService.update(dbUser.id, { subscriptionExpiresAt: newExpiry });
+    // Provision new key
+    const result = await this.provisionKey(dbUser, planHours);
+    if (!result) {
+      await ctx.reply(
+        `⚠️ Не удалось создать VPN-ключ. Администратор решит проблему.`,
+        { parse_mode: 'Markdown' },
+      );
+      // Refund if paid
+      if (plan.usdt > 0) {
+        const refund = (dbUser.userBalanceUSDT ?? 0);
+        await this.userService.update(dbUser.id, { userBalanceUSDT: refund + plan.usdt });
+      }
+      return false;
+    }
 
-    // Provision VPN
-    const provisioned = await this.provisionVpnForUser(dbUser.id);
-
-    const expiryStr = this.formatMskDate(newExpiry);
+    const { key } = result;
+    const expiryStr = this.formatMskDate(key.subscriptionExpiresAt!);
     const vpnButton = Markup.inlineKeyboard([
-      [Markup.button.callback('🔐 Конфигурации VPN', 'vpn_config')],
+      [Markup.button.callback('🔐 Профиль', 'vpn_config')],
       [Markup.button.callback('🔙 В меню', 'show_menu')],
     ]);
 
     if (plan.usdt === 0) {
-      if (provisioned) {
-        await ctx.reply(
-          `🎉 **${plan.label}** активирован!\n\n` +
-          `✅ Подписка активна до **${expiryStr}**\n` +
-          `🔐 VPN-аккаунт создан:`,
-          { parse_mode: 'Markdown', ...vpnButton },
-        );
-      } else {
-        await ctx.reply(
-          `🎉 **${plan.label}** активирован!\n\n` +
-          `✅ Подписка активна до **${expiryStr}**\n` +
-          `⚠️ Не удалось создать VPN-аккаунт. Администратор решит проблему.`,
-          { parse_mode: 'Markdown' },
-        );
-      }
+      await ctx.reply(
+        `🎉 **${plan.label}** активирован!\n\n` +
+        `🔑 **Key${key.keyIndex}** создан\n` +
+        `📅 До: **${expiryStr}**\n` +
+        `\n🔐 Готов к использованию:`,
+        { parse_mode: 'Markdown', ...vpnButton },
+      );
     } else {
-      if (provisioned) {
-        await ctx.reply(
-          `✅ Подписка **${plan.label}** оплачена с баланса!\n\n` +
-          `💸 Списано: **${plan.usdt}** USDT\n` +
-          `💰 Остаток: **${(dbUser.userBalanceUSDT - plan.usdt).toFixed(2)}** USDT\n` +
-          `📅 Подписка активна до **${expiryStr}**\n` +
-          `🔐 VPN-аккаунт создан:`,
-          { parse_mode: 'Markdown', ...vpnButton },
-        );
-      } else {
-        await ctx.reply(
-          `✅ Подписка **${plan.label}** оплачена с баланса!\n\n` +
-          `💸 Списано: **${plan.usdt}** USDT\n` +
-          `💰 Остаток: **${(dbUser.userBalanceUSDT - plan.usdt).toFixed(2)}** USDT\n` +
-          `📅 Подписка активна до **${expiryStr}**\n` +
-          `⚠️ Не удалось создать VPN-аккаунт. Администратор решит проблему.`,
-          { parse_mode: 'Markdown' },
-        );
-      }
+      await ctx.reply(
+        `✅ Подписка оплачена с баланса!\n\n` +
+        `🔑 **Key${key.keyIndex}** создан\n` +
+        `💸 Списано: **${plan.usdt}** USDT\n` +
+        `💰 Остаток: **${((dbUser.userBalanceUSDT ?? 0) - plan.usdt).toFixed(2)}** USDT\n` +
+        `📅 До: **${expiryStr}**\n` +
+        `\n🔐 Готов к использованию:`,
+        { parse_mode: 'Markdown', ...vpnButton },
+      );
     }
 
     return true;
@@ -527,9 +607,10 @@ export class BotService {
     const activeStatus = user.userIsActive ? '✅ Активен' : '⏳ Ожидает активации';
     const blockedStatus = user.userIsBlocked ? '🚫 Заблокирован' : '';
 
-    const peerInfo = user.amneziaPeerId
-      ? `\n🔐 VPN пир: \`${user.amneziaPeerId.slice(0, 8)}...\``
-      : '\n🔐 VPN пир: не создан';
+    const keyCount = (await this.vpnKeyService.findByUserId(user.id)).length;
+    const peerInfo = keyCount > 0
+      ? `\n🔐 Ключей: **${keyCount}**`
+      : '\n🔐 Ключей: нет';
 
     const info =
       `📝 **Редактирование пользователя**\n\n` +
@@ -538,9 +619,9 @@ export class BotService {
       `💼 Роль: ${user.role}\n` +
       `💰 Баланс: ${user.userBalanceUSDT} USDT / ${user.userBalanceBTC} BTC / ${user.userBalanceGram} GRAM\n` +
       `📌 Статус: ${activeStatus}\n` +
-      `📋 Подписка: ${user.subscriptionExpiresAt ? 'до ' + this.formatMskDate(user.subscriptionExpiresAt!) : 'нет'}\n` +
+      `🔑 Ключей: **${keyCount}**\n` +
       (blockedStatus ? `🚫 ${blockedStatus}\n` : '') +
-      `📅 Создан: ${user.createdAt?.toISOString().replace('T', ' ').slice(0, 19) || '—'}${peerInfo}\n\n` +
+      `📅 Создан: ${user.createdAt?.toISOString().replace('T', ' ').slice(0, 19) || '—'}\n\n` +
       `Выберите поле для редактирования:`;
 
     const buttons: any[][] = [
@@ -584,6 +665,15 @@ export class BotService {
     });
   }
 
+  /** Convert any currency amount to USDT using current rates */
+  async convertToUsdt(amount: number, currency: string): Promise<number> {
+    if (currency === 'USDT') return amount;
+    const rates = await this.fetchCoinExRates();
+    if (currency === 'BTC' && rates.btcUsdt > 0) return amount * rates.btcUsdt;
+    if (currency === 'GRAM' && rates.tonUsdt > 0) return amount * rates.tonUsdt;
+    return 0; // fallback: rate unavailable
+  }
+
   // ─── MSK timezone helpers ─────────────────────────────────
 
   private readonly MSK_OFFSET_MS = 3 * 3600_000;
@@ -607,50 +697,32 @@ export class BotService {
 
   // ─── Subscription management ───────────────────────────────
 
-  /** Show subscription management page (admin) */
+  /** Show subscription management page (admin) — shows all keys */
   async showSubscriptionManagement(ctx: Context, user: User) {
-    const peerInfo = user.amneziaPeerId
-      ? `🔐 VPN пир: \`${user.amneziaPeerId.slice(0, 8)}...\``
-      : '🔐 VPN пир: не создан';
-    const subInfo = user.subscriptionExpiresAt
-      ? `📋 Подписка до: **${this.formatMskDate(user.subscriptionExpiresAt)}**`
-      : '📋 Подписка: нет';
+    const keys = await this.vpnKeyService.findByUserId(user.id);
+    const now = new Date();
 
-    // Fetch client status from AmneziaWG
-    let clientEnabled = true;
-    if (user.amneziaPeerId) {
-      const clients = await this.amneziaService.listClients();
-      const c = clients.find((c) => c.id === user.amneziaPeerId);
-      clientEnabled = c?.enabled ?? true;
+    let keysText = '';
+    for (const k of keys) {
+      const active = k.subscriptionExpiresAt && new Date(k.subscriptionExpiresAt) > now;
+      const status = active ? '✅' : '❌';
+      const expiry = k.subscriptionExpiresAt ? this.formatMskDate(k.subscriptionExpiresAt) : 'нет';
+      keysText += `🔑 Key${k.keyIndex}: ${status} до ${expiry} (пир: \`${k.peerId.slice(0, 8)}...\`)\n`;
     }
 
-    const statusText = user.amneziaPeerId
-      ? (clientEnabled ? '🟢 Клиент активен' : '🔴 Клиент отключён')
-      : '⚪ Клиент не создан';
-
-    const toggleLabel = clientEnabled
-      ? '🔴 Отключить клиента'
-      : '🟢 Включить клиента';
+    if (keys.length === 0) {
+      keysText = '🔐 Нет ключей';
+    }
 
     const message =
       `⚙️ **Управление подпиской**\n\n` +
-      `${subInfo}\n` +
-      `${peerInfo}\n` +
-      `${statusText}\n\n` +
-      `Действия:`;
+      `${keysText}\n` +
+      `Выберите действие:`;
 
-    const buttons: any[][] = [];
-
-    if (user.amneziaPeerId) {
-      buttons.push([
-        Markup.button.callback(toggleLabel, `togclient_${user.id}_${clientEnabled ? 'disable' : 'enable'}`),
-      ]);
-    }
-
-    buttons.push([
-      Markup.button.callback('✏️ Изменить время подписки', `ef_subscriptionExpiresAt_${user.id}`),
-    ]);
-    buttons.push([Markup.button.callback('🔙 Назад', `edit_user_${user.telegramId}`)]);
+    const buttons: any[][] = [
+      [Markup.button.callback('✏️ Изменить время подписки', `ef_subscriptionExpiresAt_${user.id}`)],
+      [Markup.button.callback('🔙 Назад', `edit_user_${user.telegramId}`)],
+    ];
 
     await ctx.reply(message, {
       parse_mode: 'Markdown',
@@ -658,18 +730,29 @@ export class BotService {
     });
   }
 
-  /** Toggle AmneziaWG client enabled/disabled */
-  async toggleClient(userId: number, enable: boolean): Promise<boolean> {
-    const user = await this.userService.findById(userId);
-    if (!user?.amneziaPeerId) return false;
+  /** Toggle AmneziaWG client enabled/disabled by key ID */
+  async toggleClient(keyId: number, enable: boolean): Promise<boolean> {
+    const key = await this.vpnKeyService.findById(keyId);
+    if (!key) return false;
 
     return enable
-      ? this.amneziaService.enableClient(user.amneziaPeerId)
-      : this.amneziaService.disableClient(user.amneziaPeerId);
+      ? this.amneziaService.enableClient(key.peerId)
+      : this.amneziaService.disableClient(key.peerId);
   }
 
-  /** Show VPN configuration page (download + QR + one-time link) */
-  async showVpnConfig(ctx: Context) {
+  /** Show "Профиль" page */
+  async showProfile(ctx: Context) {
+    await ctx.reply('🔐 **Профиль**\n\nВыберите раздел:', {
+      parse_mode: 'Markdown',
+      ...Markup.inlineKeyboard([
+        [Markup.button.callback('🔐 Конфигурации VPN', 'vpn_keys')],
+        [Markup.button.callback('🔙 Назад', 'my_subscription')],
+      ]),
+    });
+  }
+
+  /** Show list of keys for config download */
+  async showVpnKeys(ctx: Context) {
     const tgUser = ctx.from!;
     const dbUser = await this.userService.findByTelegramId(tgUser.id);
     if (!dbUser) {
@@ -677,46 +760,91 @@ export class BotService {
       return;
     }
 
+    const keys = await this.vpnKeyService.findByUserId(dbUser.id);
+    const now = new Date();
+    const activeKeys = keys.filter((k) => k.subscriptionExpiresAt && new Date(k.subscriptionExpiresAt) > now);
+
+    if (activeKeys.length === 0) {
+      await ctx.reply('❌ Нет активных ключей.', {
+        ...Markup.inlineKeyboard([[Markup.button.callback('🔙 Назад', 'vpn_config')]]),
+      });
+      return;
+    }
+
+    const buttons: any[][] = activeKeys.map((k) => {
+      const daysLeft = Math.ceil((new Date(k.subscriptionExpiresAt!).getTime() - now.getTime()) / 86400_000);
+      return [Markup.button.callback(
+        `🔑 Key${k.keyIndex} — до ${this.formatMskDate(k.subscriptionExpiresAt!)} (${daysLeft} дн.)`,
+        `keycfg_${k.id}`,
+      )];
+    });
+
+    buttons.push([Markup.button.callback('🔙 Назад', 'vpn_config')]);
+
+    await ctx.reply('🔐 **Конфигурации VPN**\n\nВыберите ключ:', {
+      parse_mode: 'Markdown',
+      ...Markup.inlineKeyboard(buttons),
+    });
+  }
+
+  /** Show actions for a specific key */
+  async showKeyActions(ctx: Context, keyId: number) {
+    const key = await this.vpnKeyService.findById(keyId);
+    if (!key) {
+      await ctx.reply('❌ Ключ не найден.');
+      return;
+    }
+
     const message =
-      `🔐 **Конфигурации VPN**\n\n` +
-      `Выберите способ получения конфигурации:`;
+      `🔑 **Key${key.keyIndex}**\n` +
+      `📅 До: **${this.formatMskDate(key.subscriptionExpiresAt!)}**\n\n` +
+      `Выберите действие:`;
 
     await ctx.reply(message, {
       parse_mode: 'Markdown',
       ...Markup.inlineKeyboard([
-        [Markup.button.callback('📥 Скачать конфигурацию', 'get_link')],
-        [Markup.button.callback('📱 Получить QRcode', 'get_qr')],
-        [Markup.button.callback('🔗 Одноразовая ссылка', 'onetimelink')],
-        [Markup.button.callback('🔙 Назад', 'my_subscription')],
+        [Markup.button.callback('📥 Скачать конфигурацию', `getlink_${key.id}`)],
+        [Markup.button.callback('📱 Получить QRcode', `getqr_${key.id}`)],
+        [Markup.button.callback('🔗 Одноразовая ссылка', `otlink_${key.id}`)],
+        [Markup.button.callback('🔙 Назад', 'vpn_keys')],
       ]),
     });
   }
 
   // ─── Deposit / Payment verification ─────────────────────
 
-  /** Ask user to select currency for deposit */
+  /** Ask user to select currency for deposit (filtered by env) */
   async showDepositCurrencySelect(ctx: Context) {
+    const currencies = this.getEnabledCurrencies();
+    const currencyButtons: any[] = [];
+    const labels: Record<string, string> = { USDT: '💵 USDT', BTC: '₿ BTC', GRAM: '💎 GRAM' };
+
+    // Build row(s) of currency buttons
+    for (let i = 0; i < currencies.length; i += 3) {
+      currencyButtons.push(
+        currencies.slice(i, i + 3).map((c) =>
+          Markup.button.callback(labels[c] || c, `dep_currency_${c}`),
+        ),
+      );
+    }
+
     await ctx.reply(
       '✅ **Я оплатил**\n\nВыберите валюту пополнения:',
       {
         parse_mode: 'Markdown',
         ...Markup.inlineKeyboard([
-          [
-            Markup.button.callback('₿ BTC', 'dep_currency_BTC'),
-            Markup.button.callback('💵 USDT', 'dep_currency_USDT'),
-            Markup.button.callback('💎 GRAM', 'dep_currency_GRAM'),
-          ],
+          ...currencyButtons,
           [Markup.button.callback('🔙 Отмена', 'show_menu')],
         ]),
       },
     );
   }
 
-  /** Prompt user to enter TxID and amount */
+  /** Prompt user to enter TxID (amount will be fetched from blockchain later) */
   async showTxIdPrompt(ctx: Context, currency: string) {
     await ctx.reply(
-      `📝 Введите **TxID** транзакции и **сумму** через пробел:\n\n` +
-      `Пример: \`abc123def456... 0.005\`\n\n` +
+      `📝 Введите **TxID** транзакции:\n\n` +
+      `Пример: \`abc123def456...\`\n\n` +
       `Валюта: **${currency}**\n` +
       `(отправьте /cancel для отмены)`,
       { parse_mode: 'Markdown' },
@@ -753,7 +881,7 @@ export class BotService {
         return { success: false, error: `Адрес получателя не совпадает с BTC_PAYMENT_ADDRESS.` };
       }
 
-      if (Math.abs(totalToUs - expectedAmount) > 0.0001) {
+      if (expectedAmount > 0 && Math.abs(totalToUs - expectedAmount) > 0.0001) {
         return {
           success: false,
           error: `Сумма не совпадает. Ожидалось: ${expectedAmount} BTC, найдено: ${totalToUs.toFixed(8)} BTC.`,
@@ -815,88 +943,28 @@ export class BotService {
     }
   }
 
-  /** Generate one-time config link for user */
-  async getOneTimeLink(peerId: string): Promise<string | null> {
-    return this.amneziaService.getOneTimeLink(peerId);
+  /** Generate one-time config link for a key */
+  async getOneTimeLink(keyId: number): Promise<string | null> {
+    const key = await this.vpnKeyService.findById(keyId);
+    if (!key) return null;
+    return this.amneziaService.getOneTimeLink(key.peerId);
   }
 
-  /** Update subscription expiry — DB + AmneziaWG sync */
-  async updateSubscription(
-    userId: number,
+  /** Update key subscription expiry — DB + AmneziaWG sync */
+  async updateKeySubscription(
+    keyId: number,
     newExpiry: Date,
-    oldUser: User,
   ): Promise<{ synced: boolean }> {
-    await this.userService.update(userId, { subscriptionExpiresAt: newExpiry });
+    const key = await this.vpnKeyService.findById(keyId);
+    if (!key) return { synced: false };
 
-    // Sync with AmneziaWG if user has a peer
-    let synced = false;
-    if (oldUser.amneziaPeerId) {
-      synced = await this.amneziaService.updateClientExpireDate(
-        oldUser.amneziaPeerId,
-        newExpiry.toISOString(),
-      );
-    }
+    await this.vpnKeyService.update(keyId, { subscriptionExpiresAt: newExpiry });
+
+    const synced = await this.amneziaService.updateClientExpireDate(
+      key.peerId,
+      newExpiry.toISOString(),
+    );
     return { synced };
-  }
-
-  // ─── AmneziaWG VPN provisioning ────────────────────────────
-
-  /** Ensure user has an AmneziaWG peer; create one and link it if not */
-  async ensureUserHasPeer(user: User): Promise<string | null> {
-    // Calculate remaining hours for AmneziaWG client expiry
-    const expireHours = user.subscriptionExpiresAt
-      ? Math.ceil((new Date(user.subscriptionExpiresAt).getTime() - Date.now()) / 3600_000)
-      : undefined;
-
-    // If existing peer, just fetch config (AmneziaWG expiry was set at creation)
-    if (user.amneziaPeerId) {
-      const config = await this.amneziaService.getClientConfig(user.amneziaPeerId);
-      if (config) return config;
-      // Peer might have been deleted on server — recreate
-      this.logger.warn(`Client ${user.amneziaPeerId} not found on server, recreating...`);
-    }
-
-    // Create new peer with subscription-based expiry
-    const clientName = user.firstName || user.username || `user_${user.telegramId}`;
-    const client = await this.amneziaService.createClient(clientName, expireHours);
-    if (!client) {
-      this.logger.error(`Failed to create client for user ${user.telegramId}`);
-      return null;
-    }
-
-    // Link client to user in DB
-    await this.userService.update(user.id, { amneziaPeerId: client.id });
-
-    // Fetch config for the newly created client
-    return this.amneziaService.getClientConfig(client.id);
-  }
-
-  /** Provision VPN for a user after subscription activation */
-  async provisionVpnForUser(userId: number): Promise<boolean> {
-    const user = await this.userService.findById(userId);
-    if (!user) return false;
-
-    const config = await this.ensureUserHasPeer(user);
-    if (!config) {
-      this.logger.error(`VPN provisioning failed for user ${userId}`);
-      return false;
-    }
-
-    this.logger.log(`VPN provisioned for user ${user.telegramId} (peer=${user.amneziaPeerId})`);
-    return true;
-  }
-
-  /** Remove user's VPN peer (on subscription expiry or block) */
-  async deprovisionVpnForUser(userId: number): Promise<boolean> {
-    const user = await this.userService.findById(userId);
-    if (!user?.amneziaPeerId) return false;
-
-    const deleted = await this.amneziaService.deleteClient(user.amneziaPeerId);
-    if (deleted) {
-      await this.userService.update(userId, { amneziaPeerId: null });
-      this.logger.log(`VPN deprovisioned for user ${user.telegramId}`);
-    }
-    return deleted;
   }
 
   async handlePreCheckoutQuery(ctx: Context) {

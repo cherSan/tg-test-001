@@ -1,5 +1,6 @@
 import {Update, Start, Help, On, Hears, Ctx, Command, Action, Settings} from 'nestjs-telegraf';
 import {Context, Markup} from 'telegraf';
+import FormData from 'form-data';
 import { BotService } from './bot.service';
 import {QrCodeService} from "../../qr/qr.service";
 import {UserService} from "../../db/user.service";
@@ -32,6 +33,10 @@ interface SessionData {
 
 @Update()
 export class BotUpdate {
+  /** Cooldown per button: "telegramId:action" → last request timestamp */
+  private readonly configCooldown = new Map<string, number>();
+  private readonly CONFIG_COOLDOWN_MS = 30_000;
+
   constructor(
     private readonly botService: BotService,
     private readonly qr: QrCodeService,
@@ -380,6 +385,26 @@ export class BotUpdate {
     await this.botService.showBuySubscription(ctx);
   }
 
+  /** User selected a plan to buy with balance */
+  @Action(/^buyplan_(\d+)$/)
+  async onBuyPlan(@Ctx() ctx: Context) {
+    await ctx.answerCbQuery();
+    if (!(await this.checkActive(ctx))) return;
+
+    const match = (ctx as any).match;
+    const hours = parseInt(match[1], 10);
+    await this.botService.purchaseSubscriptionWithBalance(ctx, hours);
+  }
+
+  /** Show top-up page with payment addresses */
+  @Action('top_up')
+  async onTopUp(@Ctx() ctx: Context) {
+    await ctx.answerCbQuery();
+    if (!(await this.checkActive(ctx))) return;
+
+    await this.botService.showTopUpBalance(ctx);
+  }
+
   // ─── Deposit flow ──────────────────────────────────────────
 
   @Action('i_paid')
@@ -441,22 +466,116 @@ export class BotUpdate {
     }
   }
 
-  @Action('get_link')
-  async onGetLink(@Ctx() ctx: Context) {
+  /** Show VPN config page with download/QR options */
+  @Action('vpn_config')
+  async onVpnConfig(@Ctx() ctx: Context) {
     await ctx.answerCbQuery();
     if (!(await this.checkActive(ctx))) return;
     if (!(await this.checkSubscription(ctx))) return;
-    await ctx.reply('Вот ваша ссылка.');
+    await this.botService.showVpnConfig(ctx);
+  }
+
+  @Action('get_link')
+  async onGetLink(@Ctx() ctx: Context & { session: SessionData }) {
+    this.safeAnswerCbQuery(ctx);
+    const chatId = ctx.chat!.id;
+    const tgUser = ctx.from!;
+
+    if (!(await this.checkActive(ctx))) return;
+    if (!(await this.checkSubscription(ctx))) return;
+    if (!this.checkConfigCooldown(ctx, tgUser.id, 'link')) return;
+
+
+    const dbUser = await this.userService.findByTelegramId(tgUser.id);
+    if (!dbUser) {
+      await ctx.reply('❌ Пользователь не найден.');
+      return;
+    }
+
+    const config = await this.botService.ensureUserHasPeer(dbUser);
+    if (!config) {
+      await ctx.reply('❌ Не удалось получить конфигурацию VPN.');
+      return;
+    }
+
+    await this.sendFileDirectly(
+      'sendDocument',
+      chatId,
+      Buffer.from(config, 'utf-8'),
+      `amnezia_${dbUser.telegramId}.conf`,
+      '🔐 Ваш конфигурационный файл AmneziaWG',
+    );
   }
 
   @Action('get_qr')
-  async onGetQR(@Ctx() ctx: Context) {
-    await ctx.answerCbQuery();
+  async onGetQR(@Ctx() ctx: Context & { session: SessionData }) {
+    this.safeAnswerCbQuery(ctx);
+    const chatId = ctx.chat!.id;
+    const tgUser = ctx.from!;
+
     if (!(await this.checkActive(ctx))) return;
     if (!(await this.checkSubscription(ctx))) return;
-    const qr = await this.qr.generateQrBuffer('HELLO, TEST CONNECTION');
-    await ctx.reply('Вот ваш QR-код.');
-    await ctx.sendPhoto({ source: qr });
+    if (!this.checkConfigCooldown(ctx, tgUser.id, 'qr')) return;
+
+
+    const dbUser = await this.userService.findByTelegramId(tgUser.id);
+    if (!dbUser) {
+      await ctx.reply('❌ Пользователь не найден.');
+      return;
+    }
+
+    const config = await this.botService.ensureUserHasPeer(dbUser);
+    if (!config) {
+      await ctx.reply('❌ Не удалось получить конфигурацию VPN.');
+      return;
+    }
+
+    const qrBuffer = await this.qr.generateQrBuffer(config);
+    await this.sendFileDirectly(
+      'sendPhoto',
+      chatId,
+      qrBuffer,
+      `amnezia_qr_${dbUser.telegramId}.png`,
+      '📱 Отсканируйте QR-код в приложении AmneziaWG',
+    );
+  }
+
+  @Action('onetimelink')
+  async onOneTimeLink(@Ctx() ctx: Context & { session: SessionData }) {
+    this.safeAnswerCbQuery(ctx);
+    const chatId = ctx.chat!.id;
+    const tgUser = ctx.from!;
+
+    if (!(await this.checkActive(ctx))) return;
+    if (!(await this.checkSubscription(ctx))) return;
+    if (!this.checkConfigCooldown(ctx, tgUser.id, 'onetime')) return;
+
+    const dbUser = await this.userService.findByTelegramId(tgUser.id);
+    if (!dbUser) {
+      await ctx.reply('❌ Пользователь не найден.');
+      return;
+    }
+
+    if (!dbUser.amneziaPeerId) {
+      await ctx.reply('❌ VPN-аккаунт не найден. Сначала активируйте подписку.');
+      return;
+    }
+
+    await ctx.reply('⏳ Генерирую одноразовую ссылку...');
+
+    const link = await this.botService.getOneTimeLink(dbUser.amneziaPeerId);
+    if (!link) {
+      await ctx.reply('❌ Не удалось создать одноразовую ссылку.');
+      return;
+    }
+
+    await ctx.telegram.sendMessage(
+      chatId,
+      `🔗 **Одноразовая ссылка на конфигурацию**\n\n` +
+      `[Скачать конфигурацию](${link})\n\n` +
+      `⚠️ Ссылка действительна **однократно** и ограничена по времени.`,
+      { parse_mode: 'Markdown', link_preview_options: { is_disabled: true } },
+    );
   }
 
   @Action('wizard_test')
@@ -632,6 +751,12 @@ export class BotUpdate {
     const newExpiry = new Date(base.getTime() + 7 * 24 * 60 * 60 * 1000);
 
     await this.userService.update(userId, { subscriptionExpiresAt: newExpiry });
+
+    // Provision VPN if not already done
+    if (!user.amneziaPeerId) {
+      await this.botService.provisionVpnForUser(userId);
+    }
+
     await ctx.reply(
       `📅 Подписка продлена до **${newExpiry.toISOString().replace('T', ' ').slice(0, 19)}**`,
       { parse_mode: 'Markdown' },
@@ -1014,6 +1139,50 @@ export class BotUpdate {
     }
 
     await this.botService.sendActivationNotificationToUser(ctx, targetTelegramId);
+  }
+
+  /** Rate-limit config/QR requests per-button: true = allowed, false = cooldown active */
+  private checkConfigCooldown(ctx: Context, telegramId: number, action: string): boolean {
+    const key = `${telegramId}:${action}`;
+    const last = this.configCooldown.get(key);
+    const now = Date.now();
+    if (last && (now - last) < this.CONFIG_COOLDOWN_MS) {
+      const remaining = Math.ceil((this.CONFIG_COOLDOWN_MS - (now - last)) / 1000);
+      ctx.answerCbQuery(`⏳ Подождите ${remaining} сек.`).catch(() => {});
+      return false;
+    }
+    this.configCooldown.set(key, now);
+    return true;
+  }
+
+  /** Fire-and-forget answerCbQuery — dismiss spinner immediately, ignore errors */
+  private safeAnswerCbQuery(ctx: Context) {
+    ctx.answerCbQuery().catch(() => {});
+  }
+
+  /** Send a file directly to Telegram API using form-data, bypassing Telegraf */
+  private async sendFileDirectly(
+    method: 'sendDocument' | 'sendPhoto',
+    chatId: number,
+    buffer: Buffer,
+    filename: string,
+    caption: string,
+  ) {
+    const token = process.env.TG_API_KEY!;
+    const form = new FormData();
+    form.append('chat_id', String(chatId));
+    form.append(method === 'sendDocument' ? 'document' : 'photo', buffer, { filename });
+    form.append('caption', caption);
+
+    // getBuffer() returns a Buffer compatible with global fetch (unlike the stream)
+    const body = form.getBuffer();
+    const headers = form.getHeaders();
+
+    await fetch(`https://api.telegram.org/bot${token}/${method}`, {
+      method: 'POST',
+      body,
+      headers,
+    });
   }
 
   /** Check if current user is admin — reply error if not */

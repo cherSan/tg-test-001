@@ -65,6 +65,10 @@ export class User {
   @Column({ type: 'datetime', nullable: true })
   subscriptionExpiresAt!: Date | null;
 
+  /** AmneziaWG peer ID — linked VPN client */
+  @Column({ type: 'varchar', length: 64, nullable: true })
+  amneziaPeerId?: string | null;
+
   @CreateDateColumn()
   createdAt!: Date;
 

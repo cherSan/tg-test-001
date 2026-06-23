@@ -1,18 +1,22 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, Logger } from '@nestjs/common';
 import {Context, Markup} from "telegraf";
 import { UserService } from '../../db/user.service';
 import { User } from '../../db/entities/user.entity';
 import { DepositService } from '../../db/deposit.service';
 import { Deposit } from '../../db/entities/deposit.entity';
+import { AmneziaService } from '../../amnezia/amnezia.service';
 
 @Injectable()
 export class BotService {
+  private readonly logger = new Logger(BotService.name);
+
   /** Auto-activate users after CAPTCHA (can be toggled in admin settings) */
   autoActivate: boolean = process.env.AUTO_ACTIVATE === 'true';
 
   constructor(
     private readonly userService: UserService,
     private readonly depositService: DepositService,
+    private readonly amneziaService: AmneziaService,
   ) {}
 
   getWelcomeMessage(username: string): string {
@@ -37,17 +41,12 @@ export class BotService {
       ],
       [
         Markup.button.callback('💰 Баланс', 'balance'),
+        Markup.button.callback('💳 Пополнить баланс', 'top_up'),
+      ],
+      [
         Markup.button.callback('📋 Мои подписки', 'my_subscription'),
       ],
     ];
-
-    // Premium features — only for active subscribers
-    if (hasSub) {
-      buttons.push([
-        Markup.button.callback('Получить QR', 'get_qr'),
-        Markup.button.callback('Получить ссылку', 'get_link'),
-      ]);
-    }
 
     buttons.push([
       Markup.button.callback('Тест визарда', 'wizard_test'),
@@ -210,10 +209,15 @@ export class BotService {
       `💰 **Ваш баланс**\n\n` +
       `💵 USDT: **${usdt}**\n` +
       `₿  BTC: **${btc}**\n` +
-      `💎 GRAM: **${gram}**\n\n` +
-      `Для пополнения перейдите в «📋 Мои подписки».`;
+      `💎 GRAM: **${gram}**`;
 
-    await ctx.reply(message, { parse_mode: 'Markdown' });
+    await ctx.reply(message, {
+      parse_mode: 'Markdown',
+      ...Markup.inlineKeyboard([
+        [Markup.button.callback('💳 Пополнить баланс', 'top_up')],
+        [Markup.button.callback('🔙 Назад', 'show_menu')],
+      ]),
+    });
   }
 
   /** Check if user has an active (non-expired) subscription */
@@ -251,12 +255,21 @@ export class BotService {
         `❌ Нет активных подписок`;
     }
 
+    const buttons: any[][] = [
+      [Markup.button.callback(buyLabel, 'buy')],
+      [Markup.button.callback('💳 Пополнить баланс', 'top_up')],
+    ];
+
+    // Show VPN config button only if user has active subscription
+    if (hasSub) {
+      buttons.push([Markup.button.callback('🔐 Конфигурации VPN', 'vpn_config')]);
+    }
+
+    buttons.push([Markup.button.callback('🔙 Назад', 'show_menu')]);
+
     await ctx.reply(message, {
       parse_mode: 'Markdown',
-      ...Markup.inlineKeyboard([
-        [Markup.button.callback(buyLabel, 'buy')],
-        [Markup.button.callback('🔙 Назад', 'show_menu')],
-      ]),
+      ...Markup.inlineKeyboard(buttons),
     });
   }
 
@@ -313,40 +326,63 @@ export class BotService {
     });
   }
 
-  /** Show subscription purchase info with payment addresses */
+  /** Show "buy with balance" — plans with inline buttons */
   async showBuySubscription(ctx: Context) {
+    const tgUser = ctx.from!;
+    const dbUser = await this.userService.findByTelegramId(tgUser.id);
+    const balance = dbUser?.userBalanceUSDT ?? 0;
+
     const rates = await this.fetchCoinExRates();
     const plans = this.getSubscriptionPlans(rates);
-    const usdtAddr = process.env.USDT_PAYMENT_ADDRESS || 'не задан';
-    const btcAddr = process.env.BTC_PAYMENT_ADDRESS || 'не задан';
-    const gramAddr = process.env.GRAM_PAYMENT_ADDRESS || 'не задан';
 
     // Build plans table
     let plansText = '';
     for (const p of plans) {
-      const btcStr = p.btc !== null ? `**${p.btc}** BTC` : '—';
-      const gramStr = p.gram !== null ? `**${p.gram}** GRAM` : '—';
+      const btcStr = p.btc !== null ? `~${p.btc} BTC` : '';
+      const gramStr = p.gram !== null ? `~${p.gram} GRAM` : '';
+      const altStr = [btcStr, gramStr].filter(Boolean).join(' / ');
       if (p.usdt === 0) {
         plansText += `${p.label}: **Бесплатно**\n`;
       } else {
-        plansText += `${p.label}: **${p.usdt}** USDT (${btcStr} / ${gramStr})\n`;
+        plansText += `${p.label}: **${p.usdt}** USDT${altStr ? ` (${altStr})` : ''}\n`;
       }
     }
 
-    const exchangeName = rates.exchange || 'CoinEx';
-    const ratesInfo = rates.btcUsdt > 0
-      ? `\n📊 Курс ${exchangeName}: 1 BTC = **${rates.btcUsdt}** USDT | 1 GRAM = **${rates.tonUsdt}** USDT\n`
-      : `\n⚠️ Не удалось получить курс ${exchangeName}, цены в BTC/GRAM не рассчитаны.\n`;
-
     const message =
       `💳 **Покупка подписки**\n\n` +
-      `Тарифы:\n${plansText}` +
-      ratesInfo +
-      `\nАдреса для оплаты:\n` +
+      `Тарифы:\n${plansText}\n` +
+      `💰 Ваш баланс: **${balance.toFixed(2)}** USDT\n\n` +
+      `Выберите тариф (средства спишутся с баланса):`;
+
+    // Build plan buttons
+    const planButtons: any[][] = plans.map((p) => {
+      const label = p.usdt === 0
+        ? `${p.label} — Бесплатно`
+        : `${p.label} — ${p.usdt} USDT`;
+      return [Markup.button.callback(label, `buyplan_${p.hours}`)];
+    });
+
+    planButtons.push([Markup.button.callback('🔙 Назад', 'my_subscription')]);
+
+    await ctx.reply(message, {
+      parse_mode: 'Markdown',
+      ...Markup.inlineKeyboard(planButtons),
+    });
+  }
+
+  /** Show top-up page with payment addresses */
+  async showTopUpBalance(ctx: Context) {
+    const usdtAddr = process.env.USDT_PAYMENT_ADDRESS || 'не задан';
+    const btcAddr = process.env.BTC_PAYMENT_ADDRESS || 'не задан';
+    const gramAddr = process.env.GRAM_PAYMENT_ADDRESS || 'не задан';
+
+    const message =
+      `💳 **Пополнение баланса**\n\n` +
+      `Отправьте криптовалюту на один из адресов:\n\n` +
       `💵 USDT: \`${usdtAddr}\`\n` +
       `₿  BTC: \`${btcAddr}\`\n` +
       `💎 GRAM: \`${gramAddr}\`\n\n` +
-      `После отправки средств нажмите «✅ Я оплатил» для зачисления.`;
+      `После отправки нажмите «✅ Я оплатил» и укажите детали транзакции.`;
 
     await ctx.reply(message, {
       parse_mode: 'Markdown',
@@ -355,6 +391,95 @@ export class BotService {
         [Markup.button.callback('🔙 Назад', 'show_menu')],
       ]),
     });
+  }
+
+  /** Purchase a subscription plan with balance */
+  async purchaseSubscriptionWithBalance(ctx: Context, planHours: number): Promise<boolean> {
+    const tgUser = ctx.from!;
+    const dbUser = await this.userService.findByTelegramId(tgUser.id);
+    if (!dbUser) {
+      await ctx.reply('❌ Пользователь не найден.');
+      return false;
+    }
+
+    // Resolve plan price from env by hours
+    const plans = this.getSubscriptionPlans({ btcUsdt: 0, tonUsdt: 0 });
+    const plan = plans.find((p) => p.hours === planHours);
+    if (!plan) {
+      await ctx.reply('❌ Тариф не найден.');
+      return false;
+    }
+
+    // Check balance (skip for free plans)
+    if (plan.usdt > 0 && dbUser.userBalanceUSDT < plan.usdt) {
+      await ctx.reply(
+        `❌ Недостаточно средств!\n\n` +
+        `Тариф: **${plan.usdt}** USDT\n` +
+        `Ваш баланс: **${dbUser.userBalanceUSDT.toFixed(2)}** USDT\n\n` +
+        `Пополните баланс через «💳 Пополнить баланс».`,
+        { parse_mode: 'Markdown' },
+      );
+      return false;
+    }
+
+    // Deduct from balance
+    if (plan.usdt > 0) {
+      const newBalance = dbUser.userBalanceUSDT - plan.usdt;
+      await this.userService.update(dbUser.id, { userBalanceUSDT: newBalance });
+    }
+
+    // Set subscription expiry
+    const now = new Date();
+    const base = dbUser.subscriptionExpiresAt && dbUser.subscriptionExpiresAt > now
+      ? new Date(dbUser.subscriptionExpiresAt)
+      : now;
+    const newExpiry = new Date(base.getTime() + planHours * 3600 * 1000);
+
+    await this.userService.update(dbUser.id, { subscriptionExpiresAt: newExpiry });
+
+    // Provision VPN
+    const provisioned = await this.provisionVpnForUser(dbUser.id);
+
+    const expiryStr = newExpiry.toISOString().replace('T', ' ').slice(0, 19);
+    if (plan.usdt === 0) {
+      if (provisioned) {
+        await ctx.reply(
+          `🎉 **${plan.label}** активирован!\n\n` +
+          `✅ Подписка активна до **${expiryStr}**\n` +
+          `🔐 VPN-аккаунт создан. Используйте «Получить ссылку» или «Получить QR» для подключения.`,
+          { parse_mode: 'Markdown' },
+        );
+      } else {
+        await ctx.reply(
+          `🎉 **${plan.label}** активирован!\n\n` +
+          `✅ Подписка активна до **${expiryStr}**\n` +
+          `⚠️ Не удалось создать VPN-аккаунт. Администратор решит проблему.`,
+          { parse_mode: 'Markdown' },
+        );
+      }
+    } else {
+      if (provisioned) {
+        await ctx.reply(
+          `✅ Подписка **${plan.label}** оплачена с баланса!\n\n` +
+          `💸 Списано: **${plan.usdt}** USDT\n` +
+          `💰 Остаток: **${(dbUser.userBalanceUSDT - plan.usdt).toFixed(2)}** USDT\n` +
+          `📅 Подписка активна до **${expiryStr}**\n` +
+          `🔐 VPN-аккаунт создан. Используйте «Получить ссылку» или «Получить QR» для подключения.`,
+          { parse_mode: 'Markdown' },
+        );
+      } else {
+        await ctx.reply(
+          `✅ Подписка **${plan.label}** оплачена с баланса!\n\n` +
+          `💸 Списано: **${plan.usdt}** USDT\n` +
+          `💰 Остаток: **${(dbUser.userBalanceUSDT - plan.usdt).toFixed(2)}** USDT\n` +
+          `📅 Подписка активна до **${expiryStr}**\n` +
+          `⚠️ Не удалось создать VPN-аккаунт. Администратор решит проблему.`,
+          { parse_mode: 'Markdown' },
+        );
+      }
+    }
+
+    return true;
   }
 
   /** Show users awaiting activation (admin only) */
@@ -436,6 +561,30 @@ export class BotService {
     await ctx.reply(info, {
       parse_mode: 'Markdown',
       ...Markup.inlineKeyboard(buttons),
+    });
+  }
+
+  /** Show VPN configuration page (download + QR + one-time link) */
+  async showVpnConfig(ctx: Context) {
+    const tgUser = ctx.from!;
+    const dbUser = await this.userService.findByTelegramId(tgUser.id);
+    if (!dbUser) {
+      await ctx.reply('❌ Пользователь не найден.');
+      return;
+    }
+
+    const message =
+      `🔐 **Конфигурации VPN**\n\n` +
+      `Выберите способ получения конфигурации:`;
+
+    await ctx.reply(message, {
+      parse_mode: 'Markdown',
+      ...Markup.inlineKeyboard([
+        [Markup.button.callback('📥 Скачать конфигурацию', 'get_link')],
+        [Markup.button.callback('📱 Получить QRcode', 'get_qr')],
+        [Markup.button.callback('🔗 Одноразовая ссылка', 'onetimelink')],
+        [Markup.button.callback('🔙 Назад', 'my_subscription')],
+      ]),
     });
   }
 
@@ -562,12 +711,112 @@ export class BotService {
     }
   }
 
+  /** Generate one-time config link for user */
+  async getOneTimeLink(peerId: string): Promise<string | null> {
+    return this.amneziaService.getOneTimeLink(peerId);
+  }
+
+  // ─── AmneziaWG VPN provisioning ────────────────────────────
+
+  /** Ensure user has an AmneziaWG peer; create one and link it if not */
+  async ensureUserHasPeer(user: User): Promise<string | null> {
+    // Return existing peer config if already provisioned
+    if (user.amneziaPeerId) {
+      const config = await this.amneziaService.getClientConfig(user.amneziaPeerId);
+      if (config) return config;
+      // Peer might have been deleted on server — recreate
+      this.logger.warn(`Peer ${user.amneziaPeerId} not found on server, recreating...`);
+    }
+
+    // Create new peer
+    const peerName = user.firstName || user.username || `user_${user.telegramId}`;
+    const peer = await this.amneziaService.createClient(peerName);
+    if (!peer) {
+      this.logger.error(`Failed to create peer for user ${user.telegramId}`);
+      return null;
+    }
+
+    // Link peer to user in DB
+    await this.userService.update(user.id, { amneziaPeerId: peer.id });
+
+    // Fetch config for the newly created client
+    return this.amneziaService.getClientConfig(peer.id);
+  }
+
+  /** Provision VPN for a user after subscription activation */
+  async provisionVpnForUser(userId: number): Promise<boolean> {
+    const user = await this.userService.findById(userId);
+    if (!user) return false;
+
+    const config = await this.ensureUserHasPeer(user);
+    if (!config) {
+      this.logger.error(`VPN provisioning failed for user ${userId}`);
+      return false;
+    }
+
+    this.logger.log(`VPN provisioned for user ${user.telegramId} (peer=${user.amneziaPeerId})`);
+    return true;
+  }
+
+  /** Remove user's VPN peer (on subscription expiry or block) */
+  async deprovisionVpnForUser(userId: number): Promise<boolean> {
+    const user = await this.userService.findById(userId);
+    if (!user?.amneziaPeerId) return false;
+
+    const deleted = await this.amneziaService.deleteClient(user.amneziaPeerId);
+    if (deleted) {
+      await this.userService.update(userId, { amneziaPeerId: null });
+      this.logger.log(`VPN deprovisioned for user ${user.telegramId}`);
+    }
+    return deleted;
+  }
+
   async handlePreCheckoutQuery(ctx: Context) {
     await ctx.answerPreCheckoutQuery(true);
   }
 
   async handleSuccessfulPayment(userId: number, payload: string, ctx: Context) {
-    console.log(`Пользователь ${userId} успешно оплатил заказ! Payload: ${payload}`);
-    await ctx.reply('🎉 Спасибо за оплату! Ваша подписка успешно активирована.');
+    this.logger.log(`User ${userId} paid, payload: ${payload}`);
+
+    // payload format: "plan_hours" e.g. "168" for 7 days
+    const hours = parseInt(payload, 10) || 0;
+    if (hours <= 0) {
+      await ctx.reply('🎉 Спасибо за оплату! Подписка активирована.');
+      return;
+    }
+
+    const dbUser = await this.userService.findByTelegramId(userId);
+    if (!dbUser) {
+      await ctx.reply('🎉 Спасибо за оплату! Но ваш профиль не найден.');
+      return;
+    }
+
+    const now = new Date();
+    const base = dbUser.subscriptionExpiresAt && dbUser.subscriptionExpiresAt > now
+      ? new Date(dbUser.subscriptionExpiresAt)
+      : now;
+    const newExpiry = new Date(base.getTime() + hours * 3600 * 1000);
+
+    await this.userService.update(dbUser.id, { subscriptionExpiresAt: newExpiry });
+
+    // Provision VPN
+    const provisioned = await this.provisionVpnForUser(dbUser.id);
+
+    const expiryStr = newExpiry.toISOString().replace('T', ' ').slice(0, 19);
+    if (provisioned) {
+      await ctx.reply(
+        `🎉 Спасибо за оплату!\n\n` +
+        `✅ Подписка активирована до **${expiryStr}**\n` +
+        `🔐 VPN-аккаунт создан. Используйте «Получить ссылку» или «Получить QR» для подключения.`,
+        { parse_mode: 'Markdown' },
+      );
+    } else {
+      await ctx.reply(
+        `🎉 Спасибо за оплату!\n\n` +
+        `✅ Подписка активирована до **${expiryStr}**\n` +
+        `⚠️ Не удалось создать VPN-аккаунт. Администратор решит проблему.`,
+        { parse_mode: 'Markdown' },
+      );
+    }
   }
 }

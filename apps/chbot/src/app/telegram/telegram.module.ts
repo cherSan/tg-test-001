@@ -23,7 +23,7 @@ const sessionMiddleWare = session();
           dropPendingUpdates: true,
         },
         options: {
-          handlerTimeout: 10000,
+          handlerTimeout: 90_000,
           telegram: {
             apiRoot: process.env.TG_API_ROOT || undefined,
           },

@@ -350,10 +350,15 @@ export class BotUpdate {
     if (!this.checkActionSpam(ctx)) { await ctx.answerCbQuery().catch(() => {}); return; }
     await ctx.answerCbQuery();
     await ctx.reply(
-      '👥 **Пригласить друга**\n\n' +
+      '🏆 **Реферальная программа**\n\n' +
       'Пригласите друга и получите бонусы!\n\n' +
       '🚧 Раздел в разработке.',
-      { parse_mode: 'Markdown' },
+      {
+        parse_mode: 'Markdown',
+        ...Markup.inlineKeyboard([
+          [Markup.button.callback('🔙 Назад', 'my_subscription')],
+        ]),
+      },
     );
   }
 
@@ -365,7 +370,12 @@ export class BotUpdate {
       '🎁 **Подарить подписку**\n\n' +
       'Вы можете подарить подписку другому пользователю.\n\n' +
       '🚧 Раздел в разработке.',
-      { parse_mode: 'Markdown' },
+      {
+        parse_mode: 'Markdown',
+        ...Markup.inlineKeyboard([
+          [Markup.button.callback('🔙 Назад', 'my_subscription')],
+        ]),
+      },
     );
   }
 
@@ -529,11 +539,13 @@ export class BotUpdate {
         : '';
 
       const buttons: any[][] = [];
+      let waitText = '';
       if (t.status === 'open') {
-        // Show reply button only if last message is from support (not from user)
         const canReply = replies.length > 0 && replies[replies.length - 1].userId !== tgUser.id;
         if (canReply) {
           buttons.push([Markup.button.callback('📝 Ответить', `user_reply_ticket_${t.id}`)]);
+        } else {
+          waitText = '\n⏳ Ожидается ответ от техподдержки, пожалуйста дождитесь ответа. Обычно он занимает до 3 часов, в крайнем случае до 24 часов.';
         }
         buttons.push([Markup.button.callback('🔴 Закрыть тикет', `close_my_ticket_${t.id}`)]);
       }
@@ -541,11 +553,15 @@ export class BotUpdate {
         buttons.push([Markup.button.callback('🔙 Назад', 'create_ticket')]);
       }
 
-      await ctx.reply(
+      const bodyText =
         `${statusIcon} **Тикет #${t.id} ${statusText}** — ${t.topic}\n` +
         `💬 ${t.message}\n` +
         `📅 ${t.createdAt.toISOString().replace('T', ' ').slice(0, 19)}` +
-        replyText,
+        replyText +
+        (waitText ? `\n\n${waitText}` : '');
+
+      await ctx.reply(
+        bodyText,
         { parse_mode: 'Markdown', ...Markup.inlineKeyboard(buttons) },
       );
     }
@@ -709,40 +725,7 @@ export class BotUpdate {
 
     const match = (ctx as any).match;
     const ticketId = parseInt(match[1], 10);
-    const ticket = await this.ticketService.findById(ticketId);
-
-    if (!ticket) {
-      await ctx.reply('❌ Тикет не найден.');
-      return;
-    }
-
-    const replies: any[] = JSON.parse(ticket.replies || '[]');
-    let replyText = replies.length > 0
-      ? '\n📩 Ответы:\n' + replies.map((r: any) => `👤 ${r.userName}: ${r.message}`).join('\n')
-      : '\n📩 Ответов пока нет';
-
-    const stIcon = ticket.status === 'open' ? '🟢' : '🔴';
-    const stText = ticket.status === 'open' ? 'Открыт' : 'Закрыт';
-
-    const buttons: any[][] = [];
-    if (ticket.status === 'open') {
-      buttons.push([Markup.button.callback('📝 Ответить', `replyticket_${ticket.id}`)]);
-      buttons.push([Markup.button.callback('🔴 Закрыть тикет', `closeticket_${ticket.id}`)]);
-    }
-    buttons.push([Markup.button.callback('🔙 К списку тикетов', 'admin_tickets')]);
-
-    await ctx.reply(
-      `${stIcon} **Тикет #${ticket.id} ${stText}**\n` +
-      `👤 ID пользователя: \`${ticket.userId}\`\n` +
-      `📌 Тема: ${ticket.topic}\n` +
-      `💬 Сообщение: ${ticket.message}\n` +
-      `📅 ${ticket.createdAt.toISOString().replace('T', ' ').slice(0, 19)}` +
-      replyText,
-      {
-        parse_mode: 'Markdown',
-        ...Markup.inlineKeyboard(buttons),
-      },
-    );
+    await this.showTicketInfo(ctx, ticketId);
   }
 
   /** Admin: start reply flow */
@@ -793,6 +776,43 @@ export class BotUpdate {
     const tgUser = ctx.from;
     if (!tgUser) return false;
     return this.userService.isAdmin(tgUser.id) || this.botService.getSupportIds().includes(tgUser.id);
+  }
+
+  /** Show ticket info without answerCbQuery (safe for text context) */
+  private async showTicketInfo(ctx: Context, ticketId: number) {
+    const ticket = await this.ticketService.findById(ticketId);
+    if (!ticket) {
+      await ctx.reply('❌ Тикет не найден.');
+      return;
+    }
+
+    const replies: any[] = JSON.parse(ticket.replies || '[]');
+    const replyText = replies.length > 0
+      ? '\n📩 Ответы:\n' + replies.map((r: any) => `👤 ${r.userName}: ${r.message}`).join('\n')
+      : '\n📩 Ответов пока нет';
+
+    const stIcon = ticket.status === 'open' ? '🟢' : '🔴';
+    const stText = ticket.status === 'open' ? 'Открыт' : 'Закрыт';
+
+    const buttons: any[][] = [];
+    if (ticket.status === 'open') {
+      buttons.push([Markup.button.callback('📝 Ответить', `replyticket_${ticket.id}`)]);
+      buttons.push([Markup.button.callback('🔴 Закрыть тикет', `closeticket_${ticket.id}`)]);
+    }
+    buttons.push([Markup.button.callback('🔙 К списку тикетов', 'admin_tickets')]);
+
+    await ctx.reply(
+      `${stIcon} **Тикет #${ticket.id} ${stText}**\n` +
+      `👤 ID пользователя: \`${ticket.userId}\`\n` +
+      `📌 Тема: ${ticket.topic}\n` +
+      `💬 Сообщение: ${ticket.message}\n` +
+      `📅 ${ticket.createdAt.toISOString().replace('T', ' ').slice(0, 19)}` +
+      replyText,
+      {
+        parse_mode: 'Markdown',
+        ...Markup.inlineKeyboard(buttons),
+      },
+    );
   }
 
   /** Check if user is support staff */
@@ -1427,23 +1447,16 @@ export class BotUpdate {
       return;
     }
 
-    const now = new Date();
-    const base = user.subscriptionExpiresAt && user.subscriptionExpiresAt > now
-      ? new Date(user.subscriptionExpiresAt)
-      : now;
-    const newExpiry = new Date(base.getTime() + 7 * 24 * 60 * 60 * 1000);
-
-    await this.userService.update(userId, { subscriptionExpiresAt: newExpiry });
-
-    // Provision VPN if not already done
-    if (!user.amneziaPeerId) {
-      await this.botService.provisionVpnForUser(userId);
+    // Create a new 7-day key
+    const result = await this.botService.provisionKey(user, 168);
+    if (result) {
+      await ctx.reply(
+        `📅 Ключ **Key${result.key.keyIndex}** создан до **${this.botService.formatMskDate(result.key.subscriptionExpiresAt!)}**`,
+        { parse_mode: 'Markdown' },
+      );
+    } else {
+      await ctx.reply('❌ Не удалось создать ключ.');
     }
-
-    await ctx.reply(
-      `📅 Подписка продлена до **${newExpiry.toISOString().replace('T', ' ').slice(0, 19)}**`,
-      { parse_mode: 'Markdown' },
-    );
     await this.botService.showUserEditFields(ctx, (await this.userService.findById(userId))!);
   }
 
@@ -1675,9 +1688,7 @@ export class BotUpdate {
 
           // Return to appropriate view
           if (this.isAdminOrSupport(ctx)) {
-            ctx.session.awaitingEditField = { userId: ticketId, field: 'ticket_reply' as any };
-            await this.onViewTicket(ctx as any);
-            ctx.session.awaitingEditField = undefined;
+            await this.showTicketInfo(ctx, ticketId);
           } else {
             await this.showSupportMenu(ctx);
           }

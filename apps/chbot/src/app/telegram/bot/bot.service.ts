@@ -1035,18 +1035,10 @@ export class BotService {
       return;
     }
 
-    const now = new Date();
-    const base = dbUser.subscriptionExpiresAt && dbUser.subscriptionExpiresAt > now
-      ? new Date(dbUser.subscriptionExpiresAt)
-      : now;
-    const newExpiry = new Date(base.getTime() + hours * 3600 * 1000);
-
-    await this.userService.update(dbUser.id, { subscriptionExpiresAt: newExpiry });
-
-    // Provision VPN
-    const provisioned = await this.provisionVpnForUser(dbUser.id);
-
-    const expiryStr = this.formatMskDate(newExpiry);
+    // Provision VPN key
+    const result = await this.provisionKey(dbUser, hours);
+    const provisioned = result !== null;
+    const expiryStr = result ? this.formatMskDate(result.key.subscriptionExpiresAt!) : '';
     const vpnButton = Markup.inlineKeyboard([
       [Markup.button.callback('🔐 Конфигурации VPN', 'vpn_config')],
       [Markup.button.callback('🔙 В меню', 'show_menu')],

@@ -413,6 +413,11 @@ export class BotUpdate {
       }
       return;
     }
+    if (ctx.session?.awaitingEditField?.field === 'referrer_code') {
+      ctx.session.awaitingEditField = undefined;
+      await this.showReferralInfo(ctx);
+      return;
+    }
     await ctx.answerCbQuery('Нет активных действий для отмены.');
   }
 
@@ -867,7 +872,7 @@ export class BotUpdate {
       [Markup.button.callback('🔗 Поделиться ссылкой', 'share_ref')],
     ];
     if (!dbUser.referrerId) {
-      buttons.push([Markup.button.callback('✏️ Ввести код рефовода', 'set_referrer')]);
+      buttons.push([Markup.button.callback('✏️ Добавить пригласившего', 'set_referrer')]);
     }
     buttons.push([Markup.button.callback('🔙 Назад', 'my_subscription')]);
 
@@ -885,7 +890,7 @@ export class BotUpdate {
       `🏆 **Реферальная программа**\n\n` +
       `${refInviteLine}` +
       `⭐ Ваш уровень: ${level} (${percent}%)\n` +
-      `🎁 Единоразовый приветственный бонус за каждого нового реферала: **${firstBonus} ${unit}**\n\n` +
+      `🎁 Единоразовый приветственный бонус за каждого нового, пополнившего баланс, реферала: **${firstBonus} ${unit}**\n\n` +
       `💡 Наша реферальная программа помогает пользоваться сервисом бесплатно! ` +
       `С большим кол-вом рефералов, Вам не придется платить за сервис! ` +
       `% от пополнения каждого реферала, возвращается Вам на баланс!\n\n` +
@@ -912,7 +917,7 @@ export class BotUpdate {
     const dbUser = await this.userService.findByTelegramId(tgUser.id);
     const code = dbUser?.referralCode || '';
     await ctx.reply(
-      `🔗 Приглашаю в AmneziaWG VPN-сервис!\n\n` +
+      `🔗 Приглашаю в HideFox VPN-сервис!\n\n` +
       `• Пробный период — 24 часа\n` +
       `• Оплата криптовалютой\n` +
       `• Свой ключ для каждого устройства\n\n` +
@@ -927,8 +932,14 @@ export class BotUpdate {
     await ctx.answerCbQuery();
     ctx.session.awaitingEditField = { userId: 0, field: 'referrer_code' as any };
     await ctx.reply(
-      '✏️ Введите **реферальный код** друга:\n(отправьте /cancel для отмены)',
-      { parse_mode: 'Markdown' },
+      '✏️ Введите **реферальный код** друга:',
+      {
+        parse_mode: 'Markdown',
+        ...Markup.inlineKeyboard([
+          [Markup.button.callback('❌ Отменить', 'cancel_action')],
+          [Markup.button.callback('🔙 Назад', 'invite_friend')],
+        ]),
+      },
     );
   }
 
@@ -976,7 +987,7 @@ export class BotUpdate {
     if (!(await this.checkActive(ctx))) return;
     await ctx.reply(
       'ℹ️ **Информация**\n\n' +
-      '🔐 Сервис AmneziaWG VPN\n' +
+      '🔐 Сервис HideFox VPN\n' +
       '💳 Оплата криптовалютой (BTC, USDT, GRAM)\n' +
       '📅 Пробный период — 24 часа\n' +
       '🔑 Поддержка нескольких ключей\n\n' +
@@ -1258,7 +1269,7 @@ export class BotUpdate {
       chatId,
       Buffer.from(config, 'utf-8'),
       `amnezia_key${key.keyIndex}.conf`,
-      `🔐 Key${key.keyIndex} — конфигурация AmneziaWG`,
+      `🔐 Key${key.keyIndex} — конфигурация HideFox VPN`,
     );
   }
 
@@ -1343,7 +1354,7 @@ export class BotUpdate {
       return;
     }
 
-    // Delete from AmneziaWG
+    // Delete from HideFox VPN
     await this.botService.deleteKey(key);
     await ctx.reply(`🗑 Ключ **Key${key.keyIndex}** удалён.`, { parse_mode: 'Markdown' });
 
@@ -1597,7 +1608,7 @@ export class BotUpdate {
     await this.botService.showSubscriptionManagement(ctx, user);
   }
 
-  /** Toggle AmneziaWG client enable/disable (admin) */
+  /** Toggle HideFox VPN client enable/disable (admin) */
   @Action(/^togclient_(\d+)_(enable|disable)$/)
   async onToggleClient(@Ctx() ctx: Context) {
     if (!this.checkActionSpam(ctx)) { await ctx.answerCbQuery().catch(() => {}); return; }

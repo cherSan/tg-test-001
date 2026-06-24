@@ -4,11 +4,11 @@ import {BotService} from "./bot.service";
 import {TestWizard} from "./test.wizzard";
 import {RandomNumberScene} from "./test.scene";
 import {DBModule} from "../../db/db.module";
-import {AmneziaModule} from "../../amnezia/amnezia.module";
+import {HideFoxModule} from "../../hidefox/hidefox.module";
 import { CommandsService } from '../commands.service';
 
 @Module({
-  imports: [DBModule, AmneziaModule],
+  imports: [DBModule, HideFoxModule],
   providers: [BotUpdate, BotService, TestWizard, RandomNumberScene, CommandsService],
 })
 export class BotModule {}

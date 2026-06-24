@@ -9,7 +9,7 @@ import { VpnKey } from '../../db/entities/vpn-key.entity';
 import { TicketService } from '../../db/ticket.service';
 import { Ticket } from '../../db/entities/ticket.entity';
 import { ReferralService } from '../../db/referral.service';
-import { AmneziaService } from '../../amnezia/amnezia.service';
+import { HideFoxService } from '../../hidefox/hidefox.service';
 
 @Injectable()
 export class BotService {
@@ -21,7 +21,7 @@ export class BotService {
   constructor(
     private readonly userService: UserService,
     private readonly depositService: DepositService,
-    private readonly amneziaService: AmneziaService,
+    private readonly hidefoxService: HideFoxService,
     private readonly vpnKeyService: VpnKeyService,
     private readonly ticketService: TicketService,
     private readonly referralService: ReferralService,
@@ -106,7 +106,7 @@ export class BotService {
           new Date(a.subscriptionExpiresAt!) > new Date(b.subscriptionExpiresAt!) ? a : b);
         const newExpiry = new Date(new Date(longest.subscriptionExpiresAt!).getTime() + days * 86400_000);
         await this.vpnKeyService.update(longest.id, { subscriptionExpiresAt: newExpiry });
-        await this.amneziaService.updateClientExpireDate(longest.peerId, newExpiry.toISOString());
+        await this.hidefoxService.updateClientExpireDate(longest.peerId, newExpiry.toISOString());
       } else {
         // Create free key in referral_free_key group
         const freeDays = parseInt(process.env.REFERRAL_FREE_KEY_DAYS || '30', 10) + days;
@@ -206,7 +206,7 @@ export class BotService {
 
   async botMenu(ctx: Context) {
     await this.replyOrEdit(ctx, 
-      'Используйте кнопки меню для навигации:',
+      ' ',
       Markup.keyboard([
         ['🔌 Подключить VPN'],
         ['👤 Профиль', '🎁 Реферальная программа'],
@@ -271,8 +271,17 @@ export class BotService {
     try {
       await ctx.telegram.sendMessage(
         telegramId,
-        '✅ Ваш аккаунт был активирован!\n\n' +
-        'Теперь вам доступны все функции бота. Отправьте /start для начала работы.',
+        '✅ Ваш аккаунт был активирован!\n\nТеперь вам доступны все функции бота.',
+      );
+      // Send keyboard immediately
+      await ctx.telegram.sendMessage(
+        telegramId,
+        ' ',
+        Markup.keyboard([
+          ['🔌 Подключить VPN'],
+          ['👤 Профиль', '🎁 Реферальная программа'],
+          ['ℹ️ Информация'],
+        ]).resize().persistent(),
       );
     } catch (_) {
       // User may not have started the bot yet — skip
@@ -585,20 +594,20 @@ export class BotService {
   /** Clean up a single expired key */
   async cleanupKey(key: VpnKey): Promise<void> {
     this.logger.log(`Cleaning up expired key ${key.keyIndex} (peer=${key.peerId})`);
-    await this.amneziaService.deleteClient(key.peerId);
+    await this.hidefoxService.deleteClient(key.peerId);
     await this.vpnKeyService.delete(key.id);
   }
 
   // ─── Key provisioning ─────────────────────────────────────
 
-  /** Create a new key for user: AmneziaWG client + VpnKey record */
+  /** Create a new key for user: HideFox VPN client + VpnKey record */
   async provisionKey(user: User, expireHours: number): Promise<{ key: VpnKey; config: string } | null> {
     const index = await this.vpnKeyService.getNextIndex(user.id);
     const clientName = `${user.firstName || user.username || `user_${user.telegramId}`} Key${index}`;
 
-    const client = await this.amneziaService.createClient(clientName, expireHours);
+    const client = await this.hidefoxService.createClient(clientName, expireHours);
     if (!client) {
-      this.logger.error(`Failed to create AmneziaWG client for ${user.telegramId} Key${index}`);
+      this.logger.error(`Failed to create HideFox VPN client for ${user.telegramId} Key${index}`);
       return null;
     }
 
@@ -610,7 +619,7 @@ export class BotService {
       subscriptionExpiresAt: expiry,
     });
 
-    const config = await this.amneziaService.getClientConfig(client.id);
+    const config = await this.hidefoxService.getClientConfig(client.id);
     if (!config) {
       this.logger.error(`Failed to get config for Key${index}`);
       return null;
@@ -621,7 +630,7 @@ export class BotService {
 
   /** Get config for an existing key */
   async getKeyConfig(key: VpnKey): Promise<string | null> {
-    return this.amneziaService.getClientConfig(key.peerId);
+    return this.hidefoxService.getClientConfig(key.peerId);
   }
 
   /** Get a VpnKey by id */
@@ -629,9 +638,9 @@ export class BotService {
     return this.vpnKeyService.findById(keyId);
   }
 
-  /** Delete a key: AmneziaWG client + DB record */
+  /** Delete a key: HideFox VPN client + DB record */
   async deleteKey(key: VpnKey): Promise<void> {
-    await this.amneziaService.deleteClient(key.peerId);
+    await this.hidefoxService.deleteClient(key.peerId);
     await this.vpnKeyService.delete(key.id);
     this.logger.log(`Deleted Key${key.keyIndex} (peer=${key.peerId})`);
   }
@@ -898,14 +907,14 @@ export class BotService {
     });
   }
 
-  /** Toggle AmneziaWG client enabled/disabled by key ID */
+  /** Toggle HideFox VPN client enabled/disabled by key ID */
   async toggleClient(keyId: number, enable: boolean): Promise<boolean> {
     const key = await this.vpnKeyService.findById(keyId);
     if (!key) return false;
 
     return enable
-      ? this.amneziaService.enableClient(key.peerId)
-      : this.amneziaService.disableClient(key.peerId);
+      ? this.hidefoxService.enableClient(key.peerId)
+      : this.hidefoxService.disableClient(key.peerId);
   }
 
   /** Show "Профиль" page */
@@ -1121,10 +1130,10 @@ export class BotService {
   async getOneTimeLink(keyId: number): Promise<string | null> {
     const key = await this.vpnKeyService.findById(keyId);
     if (!key) return null;
-    return this.amneziaService.getOneTimeLink(key.peerId);
+    return this.hidefoxService.getOneTimeLink(key.peerId);
   }
 
-  /** Update key subscription expiry — DB + AmneziaWG sync */
+  /** Update key subscription expiry — DB + HideFox VPN sync */
   async updateKeySubscription(
     keyId: number,
     newExpiry: Date,
@@ -1134,7 +1143,7 @@ export class BotService {
 
     await this.vpnKeyService.update(keyId, { subscriptionExpiresAt: newExpiry });
 
-    const synced = await this.amneziaService.updateClientExpireDate(
+    const synced = await this.hidefoxService.updateClientExpireDate(
       key.peerId,
       newExpiry.toISOString(),
     );

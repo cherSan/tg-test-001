@@ -88,6 +88,24 @@ export class BotUpdate {
       is_premium: tgUser.is_premium,
     });
 
+    // Handle referral deep link: /start refCODE
+    if (created && !user.referrerId) {
+      const payload = (ctx as any).startPayload || (ctx as any).message?.text?.split(' ')?.[1];
+      if (payload && payload.startsWith('ref')) {
+        const code = payload.replace('ref', '');
+        const referrer = await this.userService.findByReferralCode(code);
+        if (referrer && referrer.telegramId !== user.telegramId) {
+          await this.userService.setReferrer(user.id, referrer.telegramId);
+          try {
+            await ctx.telegram.sendMessage(
+              referrer.telegramId,
+              `🎉 По вашей ссылке зарегистрировался новый пользователь!`,
+            );
+          } catch (_) {}
+        }
+      }
+    }
+
     // Blocked user — reject immediately
     if (user.userIsBlocked) {
       await this.botService.sendBlockedMessage(ctx);
@@ -349,17 +367,7 @@ export class BotUpdate {
   async onInviteFriend(@Ctx() ctx: Context) {
     if (!this.checkActionSpam(ctx)) { await ctx.answerCbQuery().catch(() => {}); return; }
     await ctx.answerCbQuery();
-    await ctx.reply(
-      '🏆 **Реферальная программа**\n\n' +
-      'Пригласите друга и получите бонусы!\n\n' +
-      '🚧 Раздел в разработке.',
-      {
-        parse_mode: 'Markdown',
-        ...Markup.inlineKeyboard([
-          [Markup.button.callback('🔙 Назад', 'my_subscription')],
-        ]),
-      },
-    );
+    await this.showReferralInfo(ctx);
   }
 
   @Action('gift_sub')
@@ -823,6 +831,107 @@ export class BotUpdate {
     return ids.includes(tgUser.id);
   }
 
+  /** Show referral program info with stats */
+  private async showReferralInfo(ctx: Context) {
+    const tgUser = ctx.from!;
+    const dbUser = await this.userService.findByTelegramId(tgUser.id);
+    if (!dbUser) return;
+
+    const code = dbUser.referralCode || '—';
+    const stats = await this.botService.getReferralStats(dbUser.telegramId);
+
+    const rewardType = process.env.REFERRAL_REWARD_TYPE || 'usdt';
+    const { percent, level } = this.botService.getReferralLevel(stats.activeReferrals);
+    const firstBonus = parseFloat(process.env.REFERRAL_FIRST_PURCHASE_BONUS || '0');
+    const unit = rewardType === 'usdt' ? 'USDT' : 'дней';
+
+    // Build levels info text
+    const raw = process.env.REFERRAL_LEVELS || '0:5,5:7,15:10';
+    const entries = raw.split(',').map((s) => {
+      const [min, pct] = s.split(':').map(Number);
+      return { min: min || 0, percent: pct || 5 };
+    }).sort((a, b) => a.min - b.min);
+
+    let levelsText = '';
+    let nextLevelText = '';
+    for (let i = 0; i < entries.length; i++) {
+      const marker = i + 1 === level ? ' ◀' : '';
+      levelsText += `  ${i + 1}. ${entries[i].min}+ чел. → ${entries[i].percent}%${marker}\n`;
+      if (stats.activeReferrals < entries[i].min && !nextLevelText) {
+        const need = entries[i].min - stats.activeReferrals;
+        nextLevelText = `\n📅 До следующего уровня: ещё ${need} активных`;
+      }
+    }
+
+    const buttons: any[][] = [
+      [Markup.button.callback('🔗 Поделиться ссылкой', 'share_ref')],
+    ];
+    if (!dbUser.referrerId) {
+      buttons.push([Markup.button.callback('✏️ Ввести код рефовода', 'set_referrer')]);
+    }
+    buttons.push([Markup.button.callback('🔙 Назад', 'my_subscription')]);
+
+    // Referrer who invited this user
+    let refInviteLine = '';
+    if (dbUser.referrerId) {
+      const refUser = await this.userService.findByTelegramId(dbUser.referrerId);
+      if (refUser) {
+        const refName = refUser.firstName || refUser.username || `ID ${refUser.telegramId}`;
+        refInviteLine = `👤 Вас пригласил: **${refName}**\n\n`;
+      }
+    }
+
+    await ctx.reply(
+      `🏆 **Реферальная программа**\n\n` +
+      `${refInviteLine}` +
+      `⭐ Ваш уровень: ${level} (${percent}%)\n` +
+      `🎁 Единоразовый приветственный бонус за каждого нового реферала: **${firstBonus} ${unit}**\n\n` +
+      `💡 Наша реферальная программа помогает пользоваться сервисом бесплатно! ` +
+      `С большим кол-вом рефералов, Вам не придется платить за сервис! ` +
+      `% от пополнения каждого реферала, возвращается Вам на баланс!\n\n` +
+      `📊 Уровни рефералов:\n${levelsText}\n` +
+      `🔗 Ваша ссылка:\n\`t.me/Amnbot3bot?start=ref${code}\`\n\n` +
+      `📊 Статистика:\n` +
+      `👥 Приглашено: ${stats.totalReferrals}\n` +
+      `💳 Активных: ${stats.activeReferrals}\n` +
+      `💰 Заработано: ${stats.totalEarned.toFixed(2)} USDT` +
+      `${nextLevelText}`,
+      {
+        parse_mode: 'Markdown',
+        ...Markup.inlineKeyboard(buttons),
+      },
+    );
+  }
+
+  /** Share referral link */
+  @Action('share_ref')
+  async onShareRef(@Ctx() ctx: Context) {
+    if (!this.checkActionSpam(ctx)) { await ctx.answerCbQuery().catch(() => {}); return; }
+    await ctx.answerCbQuery();
+    const tgUser = ctx.from!;
+    const dbUser = await this.userService.findByTelegramId(tgUser.id);
+    const code = dbUser?.referralCode || '';
+    await ctx.reply(
+      `🔗 Приглашаю в AmneziaWG VPN-сервис!\n\n` +
+      `• Пробный период — 24 часа\n` +
+      `• Оплата криптовалютой\n` +
+      `• Свой ключ для каждого устройства\n\n` +
+      `Переходи: t.me/Amnbot3bot?start=ref${code}`,
+    );
+  }
+
+  /** Set referrer code */
+  @Action('set_referrer')
+  async onSetReferrer(@Ctx() ctx: Context & { session: SessionData }) {
+    if (!this.checkActionSpam(ctx)) { await ctx.answerCbQuery().catch(() => {}); return; }
+    await ctx.answerCbQuery();
+    ctx.session.awaitingEditField = { userId: 0, field: 'referrer_code' as any };
+    await ctx.reply(
+      '✏️ Введите **реферальный код** друга:\n(отправьте /cancel для отмены)',
+      { parse_mode: 'Markdown' },
+    );
+  }
+
   /** Create ticket and notify support */
   private async handleTicketCreate(ctx: Context, topic: string, message: string) {
     const tgUser = ctx.from!;
@@ -859,17 +968,7 @@ export class BotUpdate {
   @Hears('🎁 Реферальная программа')
   async onKeyboardReferral(@Ctx() ctx: Context) {
     if (!(await this.checkActive(ctx))) return;
-    await ctx.reply(
-      '🏆 **Реферальная программа**\n\n' +
-      'Пригласите друга и получите бонусы!\n\n' +
-      '🚧 Раздел в разработке.',
-      {
-        parse_mode: 'Markdown',
-        ...Markup.inlineKeyboard([
-          [Markup.button.callback('🔙 Назад', 'my_subscription')],
-        ]),
-      },
-    );
+    await this.showReferralInfo(ctx);
   }
 
   @Hears('ℹ️ Информация')
@@ -1049,6 +1148,25 @@ export class BotUpdate {
       // Always credit in USDT (auto-convert if needed)
       const usdtAmount = await this.botService.convertToUsdt(rawAmount, deposit.currency);
       await this.userService.creditBalance(deposit.userId, 'USDT', usdtAmount);
+
+      // Referral reward
+      const reward = await this.botService.processReferralReward(deposit.userId, usdtAmount);
+      if (reward) {
+        const unit = reward.rewardType === 'usdt' ? 'USDT' : 'дней';
+        const referrer = await this.userService.findById(deposit.userId);
+        if (referrer?.referrerId) {
+          try {
+            await ctx.telegram.sendMessage(
+              referrer.referrerId,
+              `🎁 **Реферальное вознаграждение!**\n\n` +
+              `👤 Пополнение от реферала\n` +
+              `💰 +${reward.totalReward} ${unit} (${reward.percent}%${reward.firstBonus > 0 ? ` + бонус ${reward.firstBonus} ${unit}` : ''})\n` +
+              `⭐ Уровень: ${reward.level}`,
+              { parse_mode: 'Markdown' },
+            );
+          } catch (_) {}
+        }
+      }
 
       if (deposit.currency === 'USDT') {
         await ctx.reply(`✅ Пополнение подтверждено, +${usdtAmount.toFixed(2)} USDT зачислено на баланс.`);
@@ -1880,6 +1998,10 @@ export class BotUpdate {
         status: 'confirmed',
       });
       await this.userService.creditBalance(dbUser!.id, 'USDT', usdtAmount);
+
+      // Referral reward for BTC auto-confirm
+      await this.botService.processReferralReward(dbUser!.id, usdtAmount);
+
       await ctx.reply(
         `✅ Пополнение подтверждено!\n` +
         `+**${result.verifiedAmount!.toFixed(8)} BTC** → **${usdtAmount.toFixed(2)} USDT** зачислено на баланс.`,
@@ -1970,6 +2092,25 @@ export class BotUpdate {
     }
 
     // ── Subscription date: redirect to key management ──
+    // ── Set referrer code ────────────────────────────────
+    if (field === 'referrer_code') {
+      const code = text.trim().toUpperCase();
+      const referrer = await this.userService.findByReferralCode(code);
+      if (!referrer) {
+        await ctx.reply('❌ Реферальный код не найден. Проверьте и попробуйте снова.');
+        return;
+      }
+      if (referrer.telegramId === userId) {
+        await ctx.reply('❌ Нельзя указать самого себя.');
+        return;
+      }
+      await this.userService.setReferrer(userId, referrer.telegramId);
+      ctx.session.awaitingEditField = undefined;
+      await ctx.reply('✅ Реферальный код принят!');
+      await this.showReferralInfo(ctx);
+      return;
+    }
+
     if (field === 'subscriptionExpiresAt') {
       await ctx.reply(
         'ℹ️ Для управления подпиской используйте **⚙️ Управление подпиской** в карточке пользователя.',

@@ -8,6 +8,7 @@ import { VpnKeyService } from '../../db/vpn-key.service';
 import { VpnKey } from '../../db/entities/vpn-key.entity';
 import { TicketService } from '../../db/ticket.service';
 import { Ticket } from '../../db/entities/ticket.entity';
+import { ReferralService } from '../../db/referral.service';
 import { AmneziaService } from '../../amnezia/amnezia.service';
 
 @Injectable()
@@ -23,7 +24,107 @@ export class BotService {
     private readonly amneziaService: AmneziaService,
     private readonly vpnKeyService: VpnKeyService,
     private readonly ticketService: TicketService,
+    private readonly referralService: ReferralService,
   ) {}
+
+  /** Get referral statistics for a user */
+  async getReferralStats(telegramId: number): Promise<{
+    totalReferrals: number;
+    activeReferrals: number;
+    totalEarned: number;
+  }> {
+    const user = await this.userService.findByTelegramId(telegramId);
+    if (!user) return { totalReferrals: 0, activeReferrals: 0, totalEarned: 0 };
+
+    const referrals = await this.userService.getReferrals(telegramId);
+    const totalReferrals = referrals.length;
+
+    // Active: has balance > 0
+    const activeReferrals = referrals.filter((r) => (r.userBalanceUSDT ?? 0) > 0).length;
+
+    const earnings = await this.referralService.findByReferrer(telegramId);
+    const totalEarned = earnings
+      .filter((e) => e.type === 'usdt')
+      .reduce((sum, e) => sum + e.amount, 0);
+
+    return { totalReferrals, activeReferrals, totalEarned };
+  }
+
+  /** Get referral level percent based on active referral count */
+  getReferralLevel(activeCount: number): { percent: number; level: number } {
+    const raw = process.env.REFERRAL_LEVELS || '0:5,5:7,15:10';
+    const entries = raw.split(',').map((s) => {
+      const [min, pct] = s.split(':').map(Number);
+      return { min: min || 0, percent: pct || 5 };
+    });
+    // Sort ascending by min
+    entries.sort((a, b) => a.min - b.min);
+
+    let level = 1;
+    let percent = entries[0]?.percent || 5;
+    for (let i = 0; i < entries.length; i++) {
+      if (activeCount >= entries[i].min) {
+        percent = entries[i].percent;
+        level = i + 1;
+      }
+    }
+    return { percent, level };
+  }
+
+  /** Process referral reward after deposit confirmation */
+  async processReferralReward(userId: number, depositAmount: number) {
+    const user = await this.userService.findById(userId);
+    if (!user?.referrerId) return;
+
+    const referrer = await this.userService.findByTelegramId(user.referrerId);
+    if (!referrer) return;
+
+    const minDeposit = parseInt(process.env.REFERRAL_MIN_DEPOSIT || '5', 10);
+    if (depositAmount < minDeposit) return;
+
+    const rewardType = process.env.REFERRAL_REWARD_TYPE || 'usdt';
+    const activeCount = (await this.referralService.getReferralCount(referrer.telegramId)) + 1;
+    const { percent, level } = this.getReferralLevel(activeCount);
+    const reward = +(depositAmount * percent / 100).toFixed(2);
+
+    // First deposit bonus
+    const firstBonus = parseFloat(process.env.REFERRAL_FIRST_PURCHASE_BONUS || '0');
+    const totalReward = reward + firstBonus;
+
+    if (rewardType === 'usdt') {
+      // Credit USDT to referrer's balance
+      const newBalance = (referrer.userBalanceUSDT ?? 0) + totalReward;
+      await this.userService.update(referrer.id, { userBalanceUSDT: newBalance });
+    } else {
+      // Extend referrer's longest key or create free key
+      const keys = await this.vpnKeyService.findByUserId(referrer.id);
+      const activeKeys = keys.filter((k) => k.subscriptionExpiresAt && new Date(k.subscriptionExpiresAt) > new Date());
+      const days = Math.round(totalReward);
+
+      if (activeKeys.length > 0) {
+        const longest = activeKeys.reduce((a, b) =>
+          new Date(a.subscriptionExpiresAt!) > new Date(b.subscriptionExpiresAt!) ? a : b);
+        const newExpiry = new Date(new Date(longest.subscriptionExpiresAt!).getTime() + days * 86400_000);
+        await this.vpnKeyService.update(longest.id, { subscriptionExpiresAt: newExpiry });
+        await this.amneziaService.updateClientExpireDate(longest.peerId, newExpiry.toISOString());
+      } else {
+        // Create free key in referral_free_key group
+        const freeDays = parseInt(process.env.REFERRAL_FREE_KEY_DAYS || '30', 10) + days;
+        await this.provisionKey(referrer, freeDays);
+      }
+    }
+
+    // Record earning
+    await this.referralService.create({
+      referrerId: referrer.telegramId,
+      referralId: user.telegramId!,
+      amount: totalReward,
+      type: rewardType,
+      level,
+    });
+
+    return { totalReward, rewardType, percent, firstBonus, level };
+  }
 
   /** Get support IDs from env */
   getSupportIds(): number[] {
@@ -271,6 +372,17 @@ export class BotService {
       .filter((k) => k.subscriptionExpiresAt && new Date(k.subscriptionExpiresAt) > now);
 
     const balance = (user.userBalanceUSDT ?? 0).toFixed(2);
+
+    // Referrer info
+    let refLine = '';
+    if (user.referrerId) {
+      const refUser = await this.userService.findByTelegramId(user.referrerId);
+      if (refUser) {
+        const refName = refUser.firstName || refUser.username || `ID ${refUser.telegramId}`;
+        refLine = `\n👤 Вас пригласил: **${refName}**\n`;
+      }
+    }
+
     let message: string;
     if (activeKeys.length > 0) {
       let keysText = '';
@@ -282,21 +394,21 @@ export class BotService {
         `👤 **Профиль**\n\n` +
         `Уважаемый пользователь, спасибо, что пользуетесь нашими услугами. У вас **${activeKeys.length}** ключ(ей).\n\n` +
         `${keysText}\n` +
-        `💰 Ваш текущий баланс: **${balance}** USDT\n\n` +
+        `💰 Ваш текущий баланс: **${balance}** USDT${refLine}\n` +
         `Если у Вас возникли трудности, перейдите в раздел «🛟 Техподдержка» ниже.`;
     } else if ((user.userBalanceUSDT ?? 0) > 0) {
       message =
         `👤 **Профиль**\n\n` +
         `Спасибо, что Вы выбрали наш сервис!\n\n` +
         `Сейчас у Вас отсутствуют ключи, перейдите в раздел «🔌 Подключить VPN» и получите ключ.\n\n` +
-        `💰 Ваш текущий баланс: **${balance}** USDT\n\n` +
+        `💰 Ваш текущий баланс: **${balance}** USDT${refLine}\n` +
         `Если у Вас возникли трудности, перейдите в раздел «🛟 Техподдержка» ниже.`;
     } else {
       message =
         `👤 **Профиль**\n\n` +
         `Спасибо, что Вы выбрали наш сервис!\n\n` +
         `Сейчас у Вас отсутствуют ключи, перейдите в раздел «🔌 Подключить VPN» и получите ключ.\n\n` +
-        `💰 Ваш текущий баланс: **${balance}** USDT\n\n` +
+        `💰 Ваш текущий баланс: **${balance}** USDT${refLine}\n` +
         `Если у Вас возникли трудности, перейдите в раздел «🛟 Техподдержка» ниже.`;
     }
 

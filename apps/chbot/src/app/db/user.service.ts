@@ -73,6 +73,7 @@ export class UserService {
       photoUrl: telegramProfile.photo_url || null,
       role,
       authToken: this.generateAuthToken(),
+      referralCode: this.generateReferralCode(),
     });
 
     const saved = await this.userRepo.save(user);
@@ -158,7 +159,23 @@ export class UserService {
     return user;
   }
 
+  async findByReferralCode(code: string): Promise<User | null> {
+    return this.userRepo.findOne({ where: { referralCode: code } });
+  }
+
+  async setReferrer(userId: number, referrerId: number): Promise<User> {
+    return this.update(userId, { referrerId } as any);
+  }
+
+  async getReferrals(referrerId: number): Promise<User[]> {
+    return this.userRepo.find({ where: { referrerId } as any });
+  }
+
   private generateAuthToken(): string {
     return crypto.randomBytes(32).toString('hex');
+  }
+
+  private generateReferralCode(): string {
+    return crypto.randomBytes(4).toString('hex').toUpperCase().slice(0, 8);
   }
 }

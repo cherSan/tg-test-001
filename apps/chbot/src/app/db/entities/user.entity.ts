@@ -73,6 +73,14 @@ export class User {
   @Column({ type: 'datetime', nullable: true })
   lastTrialAt!: Date | null;
 
+  /** Unique referral code (e.g., AB12CD34) */
+  @Column({ type: 'varchar', length: 16, nullable: true })
+  referralCode?: string | null;
+
+  /** Telegram ID of the user who referred this user */
+  @Column({ type: 'bigint', nullable: true })
+  referrerId?: number | null;
+
   @CreateDateColumn()
   createdAt!: Date;
 

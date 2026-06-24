@@ -417,6 +417,7 @@ export class BotService {
       parse_mode: 'Markdown',
       ...Markup.inlineKeyboard([
         [Markup.button.callback('💳 Завершение пополнения', 'i_paid')],
+        [Markup.button.callback('🔙 Назад', 'my_subscription')],
       ]),
     });
   }

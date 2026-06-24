@@ -402,7 +402,7 @@ export class BotUpdate {
     await ctx.answerCbQuery();
     if (ctx.session?.depositFlow) {
       ctx.session.depositFlow = undefined;
-      await ctx.reply('❌ Пополнение отменено.');
+      await this.botService.showTopUpBalance(ctx);
       return;
     }
     if (ctx.session?.ticketFlow) {
@@ -1120,6 +1120,7 @@ export class BotUpdate {
 
   @Action(/^getlink_(\d+)$/)
   async onGetLink(@Ctx() ctx: Context & { session: SessionData }) {
+    if (!this.checkActionSpam(ctx)) return;
     this.safeAnswerCbQuery(ctx);
     const chatId = ctx.chat!.id;
     const tgUser = ctx.from!;
@@ -1150,6 +1151,7 @@ export class BotUpdate {
 
   @Action(/^getqr_(\d+)$/)
   async onGetQR(@Ctx() ctx: Context & { session: SessionData }) {
+    if (!this.checkActionSpam(ctx)) return;
     this.safeAnswerCbQuery(ctx);
     const chatId = ctx.chat!.id;
     const tgUser = ctx.from!;
@@ -1238,6 +1240,7 @@ export class BotUpdate {
 
   @Action(/^otlink_(\d+)$/)
   async onOneTimeLink(@Ctx() ctx: Context & { session: SessionData }) {
+    if (!this.checkActionSpam(ctx)) return;
     this.safeAnswerCbQuery(ctx);
     const chatId = ctx.chat!.id;
     const tgUser = ctx.from!;
@@ -1613,7 +1616,7 @@ export class BotUpdate {
       // ── /cancel during deposit flow ────────────────────────
       if (text === '/cancel' && ctx.session?.depositFlow) {
         ctx.session.depositFlow = undefined;
-        await ctx.reply('❌ Пополнение отменено.');
+        await this.botService.showTopUpBalance(ctx);
         return;
       }
 

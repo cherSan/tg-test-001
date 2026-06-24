@@ -237,7 +237,7 @@ export class BotService {
 
     const buttons: any[][] = [];
     if ((user.userBalanceUSDT ?? 0) > 0) {
-      buttons.push([Markup.button.callback('🔌 Оформить подписку', 'buy')]);
+      buttons.push([Markup.button.callback('🔌 Подключить VPN', 'buy')]);
     }
     buttons.push([Markup.button.callback('💳 Пополнить баланс', 'top_up')]);
 
@@ -270,6 +270,7 @@ export class BotService {
     const activeKeys = (await this.vpnKeyService.findByUserId(user.id))
       .filter((k) => k.subscriptionExpiresAt && new Date(k.subscriptionExpiresAt) > now);
 
+    const balance = (user.userBalanceUSDT ?? 0).toFixed(2);
     let message: string;
     if (activeKeys.length > 0) {
       let keysText = '';
@@ -277,13 +278,26 @@ export class BotService {
         const daysLeft = Math.ceil((new Date(k.subscriptionExpiresAt!).getTime() - now.getTime()) / 86400_000);
         keysText += `🔑 Key${k.keyIndex}: ✅ до **${this.formatMskDate(k.subscriptionExpiresAt!)}** (${daysLeft} дн.)\n`;
       }
-      message = `👤 **Профиль**\n\n${keysText}`;
-    } else {
-      const balance = (user.userBalanceUSDT ?? 0).toFixed(2);
       message =
-        `Уважаемый пользователь, у Вас сейчас нет действующих ключей, но Вы можете их оформить.\n\n` +
-        `💰 Ваш баланс: **${balance}** USDT\n\n` +
-        `Если Вы считаете, что это ошибка, для связи с поддержкой используйте Ваш ID: \`${user.telegramId}\``;
+        `👤 **Профиль**\n\n` +
+        `Уважаемый пользователь, спасибо, что пользуетесь нашими услугами. У вас **${activeKeys.length}** ключ(ей).\n\n` +
+        `${keysText}\n` +
+        `💰 Ваш текущий баланс: **${balance}** USDT\n\n` +
+        `Если у Вас возникли трудности, перейдите в раздел «🛟 Техподдержка» ниже.`;
+    } else if ((user.userBalanceUSDT ?? 0) > 0) {
+      message =
+        `👤 **Профиль**\n\n` +
+        `Спасибо, что Вы выбрали наш сервис!\n\n` +
+        `Сейчас у Вас отсутствуют ключи, перейдите в раздел «🔌 Подключить VPN» и получите ключ.\n\n` +
+        `💰 Ваш текущий баланс: **${balance}** USDT\n\n` +
+        `Если у Вас возникли трудности, перейдите в раздел «🛟 Техподдержка» ниже.`;
+    } else {
+      message =
+        `👤 **Профиль**\n\n` +
+        `Спасибо, что Вы выбрали наш сервис!\n\n` +
+        `Сейчас у Вас отсутствуют ключи, перейдите в раздел «🔌 Подключить VPN» и получите ключ.\n\n` +
+        `💰 Ваш текущий баланс: **${balance}** USDT\n\n` +
+        `Если у Вас возникли трудности, перейдите в раздел «🛟 Техподдержка» ниже.`;
     }
 
     const buttons: any[][] = [];
@@ -291,7 +305,7 @@ export class BotService {
     if (activeKeys.length > 0) {
       buttons.push([Markup.button.callback('🔐 Конфигурации VPN', 'vpn_config')]);
     }
-    buttons.push([Markup.button.callback('🔌 Оформить подписку', 'buy')]);
+    buttons.push([Markup.button.callback('🔌 Подключить VPN', 'buy')]);
     buttons.push([Markup.button.callback('💳 Пополнить баланс', 'top_up')]);
     buttons.push([Markup.button.callback('🎁 Подарить подписку', 'gift_sub')]);
     buttons.push([Markup.button.callback('👥 Пригласить друга', 'invite_friend')]);
@@ -397,7 +411,7 @@ export class BotService {
     }
 
     const message =
-      `🔌 **Оформление подписки**\n\n` +
+      `🔌 **Подключить VPN**\n\n` +
       `💰 Ваш баланс: **${balance.toFixed(2)}** USDT\n\n` +
       `Тарифы:\n${plansText}\n` +
       trialInfo +

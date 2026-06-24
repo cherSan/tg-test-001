@@ -2108,7 +2108,7 @@ export class BotUpdate {
     if (!tgUser) return false;
     const dbUser = await this.userService.findByTelegramId(tgUser.id);
     if (!dbUser || !this.botService.hasActiveSubscription(dbUser)) {
-      await ctx.reply('🔒 Эта функция доступна только с активной подпиской.\nОформите подписку через 🔌 Оформить подписку.');
+      await ctx.reply('🔒 Эта функция доступна только с активной подпиской.\nПерейдите в раздел 🔌 Подключить VPN.');
       return false;
     }
     return true;

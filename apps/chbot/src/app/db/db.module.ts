@@ -3,9 +3,11 @@ import { TypeOrmModule } from '@nestjs/typeorm';
 import { User } from './entities/user.entity';
 import { Deposit } from './entities/deposit.entity';
 import { VpnKey } from './entities/vpn-key.entity';
+import { Ticket } from './entities/ticket.entity';
 import { UserService } from './user.service';
 import { DepositService } from './deposit.service';
 import { VpnKeyService } from './vpn-key.service';
+import { TicketService } from './ticket.service';
 
 @Module({
   imports: [
@@ -18,9 +20,9 @@ import { VpnKeyService } from './vpn-key.service';
         synchronize: true, // TODO: disable in production
       }),
     }),
-    TypeOrmModule.forFeature([User, Deposit, VpnKey]),
+    TypeOrmModule.forFeature([User, Deposit, VpnKey, Ticket]),
   ],
-  providers: [UserService, DepositService, VpnKeyService],
-  exports: [TypeOrmModule, UserService, DepositService, VpnKeyService],
+  providers: [UserService, DepositService, VpnKeyService, TicketService],
+  exports: [TypeOrmModule, UserService, DepositService, VpnKeyService, TicketService],
 })
 export class DBModule {}

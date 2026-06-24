@@ -5,6 +5,7 @@ import { BotService } from './bot.service';
 import {QrCodeService} from "../../qr/qr.service";
 import {UserService} from "../../db/user.service";
 import {DepositService} from "../../db/deposit.service";
+import { TicketService } from '../../db/ticket.service';
 import {User} from "../../db/entities/user.entity";
 import {WIZARD_SCENE_ID} from "./test.wizzard";
 import {RND_SCENE_ID} from "./test.scene";
@@ -29,6 +30,14 @@ interface SessionData {
     step: 'currency' | 'txid';
     currency?: string;
   };
+  ticketFlow?: {
+    step: 'topic' | 'message';
+    topic?: string;
+  };
+  ticketAdmin?: {
+    ticketId: number;
+    action: 'reply' | 'close';
+  };
 }
 
 @Update()
@@ -37,11 +46,29 @@ export class BotUpdate {
   private readonly configCooldown = new Map<string, number>();
   private readonly CONFIG_COOLDOWN_MS = 30_000;
 
+  /** Anti-spam: last click time per user */
+  private readonly actionCooldown = new Map<number, number>();
+
+  /** Returns true if action is allowed, false if cooldown active */
+  private checkActionSpam(ctx: Context, telegramId?: number): boolean {
+    const id = telegramId ?? ctx.from?.id;
+    if (!id) return true;
+    const now = Date.now();
+    const cooldownMs = parseInt(process.env.ACTION_COOLDOWN_MS || '1000', 10);
+    const last = this.actionCooldown.get(id);
+    if (last && (now - last) < cooldownMs) {
+      return false; // too fast, silently ignore
+    }
+    this.actionCooldown.set(id, now);
+    return true;
+  }
+
   constructor(
     private readonly botService: BotService,
     private readonly qr: QrCodeService,
     private readonly userService: UserService,
     private readonly depositService: DepositService,
+    private readonly ticketService: TicketService,
   ) {}
 
   @Start()
@@ -108,6 +135,7 @@ export class BotUpdate {
 
   @Action(/^captcha_(\-?\d+)$/)
   async onCaptchaAnswer(@Ctx() ctx: Context & { session: SessionData }) {
+    if (!this.checkActionSpam(ctx)) { await ctx.answerCbQuery().catch(() => {}); return; }
     await ctx.answerCbQuery();
 
     const pending = ctx.session?.captchaPending;
@@ -149,6 +177,7 @@ export class BotUpdate {
 
   @Action('admin_settings')
   async onAdminSettings(@Ctx() ctx: Context) {
+    if (!this.checkActionSpam(ctx)) { await ctx.answerCbQuery().catch(() => {}); return; }
     await ctx.answerCbQuery();
     if (!this.checkAdmin(ctx)) return;
     await this.botService.showAdminSettings(ctx);
@@ -156,6 +185,7 @@ export class BotUpdate {
 
   @Action('autoact_on')
   async onAutoActOn(@Ctx() ctx: Context) {
+    if (!this.checkActionSpam(ctx)) { await ctx.answerCbQuery().catch(() => {}); return; }
     await ctx.answerCbQuery();
     if (!this.checkAdmin(ctx)) return;
     this.botService.autoActivate = true;
@@ -165,6 +195,7 @@ export class BotUpdate {
 
   @Action('autoact_off')
   async onAutoActOff(@Ctx() ctx: Context) {
+    if (!this.checkActionSpam(ctx)) { await ctx.answerCbQuery().catch(() => {}); return; }
     await ctx.answerCbQuery();
     if (!this.checkAdmin(ctx)) return;
     this.botService.autoActivate = false;
@@ -176,6 +207,7 @@ export class BotUpdate {
 
   @Action('show_menu')
   async onShowMenu(@Ctx() ctx: Context) {
+    if (!this.checkActionSpam(ctx)) { await ctx.answerCbQuery().catch(() => {}); return; }
     await ctx.answerCbQuery();
     await this.botService.showMenu(ctx);
   }
@@ -185,6 +217,7 @@ export class BotUpdate {
   /** Block user from admin notification or edit screen */
   @Action(/^block_(\d+)$/)
   async onBlockUser(@Ctx() ctx: Context) {
+    if (!this.checkActionSpam(ctx)) { await ctx.answerCbQuery().catch(() => {}); return; }
     await ctx.answerCbQuery();
     if (!this.checkAdmin(ctx)) return;
 
@@ -229,6 +262,7 @@ export class BotUpdate {
   /** Unblock user from edit screen */
   @Action(/^unblock_(\d+)$/)
   async onUnblockUser(@Ctx() ctx: Context) {
+    if (!this.checkActionSpam(ctx)) { await ctx.answerCbQuery().catch(() => {}); return; }
     await ctx.answerCbQuery();
     if (!this.checkAdmin(ctx)) return;
 
@@ -250,6 +284,7 @@ export class BotUpdate {
   /** Delete user from admin notification (with confirmation) */
   @Action(/^delnotify_(\d+)$/)
   async onDeleteFromNotify(@Ctx() ctx: Context) {
+    if (!this.checkActionSpam(ctx)) { await ctx.answerCbQuery().catch(() => {}); return; }
     await ctx.answerCbQuery();
     if (!this.checkAdmin(ctx)) return;
 
@@ -293,20 +328,13 @@ export class BotUpdate {
 
   // ─── Keyboard button handlers ────────────────────────────
 
-@Hears('🔌 Подключить VPN')
+  @Hears('🔌 Подключить VPN')
   async onKeyboardConnect(@Ctx() ctx: Context) {
     if (!(await this.checkActive(ctx))) return;
-    const tgUser = ctx.from!;
-    const dbUser = await this.userService.findByTelegramId(tgUser.id);
-    if (!dbUser) return;
-
-    const hasSub = await this.botService.hasActiveSubscription(dbUser);
-    if (hasSub) {
-      await this.botService.showProfile(ctx);
-    } else {
-      await this.botService.showBuySubscription(ctx);
-    }
+    await this.botService.showBuySubscription(ctx);
   }
+
+
 
   @Hears('👤 Профиль')
   async onKeyboardProfile(@Ctx() ctx: Context) {
@@ -336,6 +364,7 @@ export class BotUpdate {
           [Markup.button.callback('💳 Пополнить баланс', 'top_up')],
           [Markup.button.callback('🎁 Подарить подписку', 'gift_sub')],
           [Markup.button.callback('👥 Пригласить друга', 'invite_friend')],
+          [Markup.button.callback('🛟 Техподдержка', 'create_ticket')],
         ]),
       });
     }
@@ -343,6 +372,7 @@ export class BotUpdate {
 
   @Action('invite_friend')
   async onInviteFriend(@Ctx() ctx: Context) {
+    if (!this.checkActionSpam(ctx)) { await ctx.answerCbQuery().catch(() => {}); return; }
     await ctx.answerCbQuery();
     await ctx.reply(
       '👥 **Пригласить друга**\n\n' +
@@ -354,6 +384,7 @@ export class BotUpdate {
 
   @Action('gift_sub')
   async onGiftSub(@Ctx() ctx: Context) {
+    if (!this.checkActionSpam(ctx)) { await ctx.answerCbQuery().catch(() => {}); return; }
     await ctx.answerCbQuery();
     await ctx.reply(
       '🎁 **Подарить подписку**\n\n' +
@@ -363,6 +394,473 @@ export class BotUpdate {
     );
   }
 
+  // ─── Support tickets ──────────────────────────────────────
+
+  @Action('cancel_action')
+  async onCancelAction(@Ctx() ctx: Context & { session: SessionData }) {
+    if (!this.checkActionSpam(ctx)) { await ctx.answerCbQuery().catch(() => {}); return; }
+    await ctx.answerCbQuery();
+    if (ctx.session?.depositFlow) {
+      ctx.session.depositFlow = undefined;
+      await ctx.reply('❌ Пополнение отменено.');
+      return;
+    }
+    if (ctx.session?.ticketFlow) {
+      ctx.session.ticketFlow = undefined;
+      // Redirect back to support menu (without double answerCbQuery)
+      await this.showSupportMenu(ctx);
+      return;
+    }
+    if (ctx.session?.ticketAdmin) {
+      ctx.session.ticketAdmin = undefined;
+      if (this.isAdminOrSupport(ctx)) {
+        await this.showAdminTickets(ctx);
+      } else {
+        await this.showSupportMenu(ctx);
+      }
+      return;
+    }
+    await ctx.answerCbQuery('Нет активных действий для отмены.');
+  }
+
+  /** Show tech support main page */
+  @Action('create_ticket')
+  async onSupportMenu(@Ctx() ctx: Context) {
+    if (!this.checkActionSpam(ctx)) { await ctx.answerCbQuery().catch(() => {}); return; }
+    await ctx.answerCbQuery();
+    await this.showSupportMenu(ctx);
+  }
+
+  /** Shared support menu (no answerCbQuery) */
+  private async showSupportMenu(ctx: Context) {
+    if (!(await this.checkActive(ctx))) return;
+
+    const tgUser = ctx.from!;
+    const maxOpen = parseInt(process.env.MAX_OPEN_TICKETS || '3', 10);
+    const openCount = await this.ticketService.countOpenByUserId(tgUser.id);
+
+    const dbUser = await this.userService.findByTelegramId(tgUser.id);
+    const hasSub = dbUser ? await this.botService.hasActiveSubscription(dbUser) : false;
+    const cooldownMin = parseInt(process.env[hasSub ? 'TICKET_TIME_WITH_SUB' : 'TICKET_TIME_NO_SUB'] || '10', 10);
+
+    await ctx.reply(
+      `🛟 **Техническая поддержка**\n\n` +
+      `📊 Открыто тикетов: ${openCount}/${maxOpen}\n` +
+      `⏱ Интервал между тикетами: ${cooldownMin} мин.\n\n` +
+      `Выберите действие:`,
+      {
+        parse_mode: 'Markdown',
+        ...Markup.inlineKeyboard([
+          [Markup.button.callback('📝 Создать тикет', 'new_ticket')],
+          [Markup.button.callback('📋 Текущие тикеты', 'my_tickets')],
+          [Markup.button.callback('📁 Закрытые тикеты', 'closed_tickets')],
+          [Markup.button.callback('🔙 Назад', 'my_subscription')],
+        ]),
+      },
+    );
+  }
+
+  /** Start ticket creation flow */
+  @Action('new_ticket')
+  async onNewTicket(@Ctx() ctx: Context & { session: SessionData }) {
+    await ctx.answerCbQuery();
+    if (!this.checkActionSpam(ctx, ctx.from!.id)) return;
+    if (!(await this.checkActive(ctx))) return;
+
+    const tgUser = ctx.from!;
+    const dbUser = await this.userService.findByTelegramId(tgUser.id);
+    const hasSub = dbUser ? await this.botService.hasActiveSubscription(dbUser) : false;
+    const hasBalance = (dbUser?.userBalanceUSDT ?? 0) > 0;
+
+    if (!hasSub && !hasBalance) {
+      await ctx.reply(
+        '⚠️ Для создания обращения необходима активная подписка или баланс > 0.',
+        { parse_mode: 'Markdown' },
+      );
+      return;
+    }
+
+    const maxOpen = parseInt(process.env.MAX_OPEN_TICKETS || '3', 10);
+    const openCount = await this.ticketService.countOpenByUserId(tgUser.id);
+    if (openCount >= maxOpen) {
+      await ctx.reply(
+        `⚠️ У вас уже ${openCount}/${maxOpen} открытых обращений.`,
+        { parse_mode: 'Markdown' },
+      );
+      return;
+    }
+
+    const cooldownMin = parseInt(process.env[hasSub ? 'TICKET_TIME_WITH_SUB' : 'TICKET_TIME_NO_SUB'] || '10', 10);
+    const recent = await this.ticketService.hasRecentTicket(tgUser.id, cooldownMin);
+    if (recent) {
+      await ctx.reply(`⏳ Интервал между тикетами: ${cooldownMin} мин. Пожалуйста, подождите.`);
+      return;
+    }
+
+    ctx.session.ticketFlow = { step: 'topic' };
+    await ctx.reply(
+      `📝 **Новый тикет**\n\nВведите **тему** обращения:`,
+      {
+        parse_mode: 'Markdown',
+        ...Markup.inlineKeyboard([
+          [Markup.button.callback('❌ Отменить', 'cancel_action')],
+        ]),
+      },
+    );
+  }
+
+  /** Show user's open tickets */
+  @Action('my_tickets')
+  async onMyTicketsList(@Ctx() ctx: Context) {
+    await ctx.answerCbQuery();
+    if (!this.checkActionSpam(ctx, ctx.from!.id)) return;
+    if (!(await this.checkActive(ctx))) return;
+
+    const tgUser = ctx.from!;
+    const tickets = (await this.ticketService.findByUserId(tgUser.id))
+      .filter((t) => t.status === 'open');
+
+    if (tickets.length === 0) {
+      await ctx.reply('📭 Нет открытых тикетов.', {
+        ...Markup.inlineKeyboard([
+          [Markup.button.callback('🔙 Назад', 'create_ticket')],
+        ]),
+      });
+      return;
+    }
+
+    const autoClose = process.env.ENABLE_AUTO_CLOSE_TICKET !== 'false';
+    const autoCloseHours = parseInt(process.env.AUTO_CLOSE_TICKET_TIME_AFTER_ANSWER || '48', 10);
+
+    const shown = tickets.slice(0, 5);
+    for (let idx = 0; idx < shown.length; idx++) {
+      const t = shown[idx];
+      const isLast = idx === shown.length - 1;
+      const replies: any[] = JSON.parse(t.replies || '[]');
+
+      // Auto-close if enabled, ticket is open, has replies, and last reply is old enough
+      if (autoClose && t.status === 'open' && replies.length > 0) {
+        const lastReply = new Date(replies[replies.length - 1].createdAt);
+        if ((Date.now() - lastReply.getTime()) > autoCloseHours * 3600_000) {
+          await this.ticketService.close(t.id);
+          t.status = 'closed';
+        }
+      }
+
+      const statusIcon = t.status === 'open' ? '🟢' : '🔴';
+      const statusText = t.status === 'open' ? 'Открыт' : 'Закрыт';
+      let replyText = replies.length > 0
+        ? '\n📩 Ответы:\n' + replies.map((r: any) => `👤 ${r.userName}: ${r.message}`).join('\n')
+        : '';
+
+      const buttons: any[][] = [];
+      if (t.status === 'open') {
+        // Show reply button only if last message is from support (not from user)
+        const canReply = replies.length > 0 && replies[replies.length - 1].userId !== tgUser.id;
+        if (canReply) {
+          buttons.push([Markup.button.callback('📝 Ответить', `user_reply_ticket_${t.id}`)]);
+        }
+        buttons.push([Markup.button.callback('🔴 Закрыть тикет', `close_my_ticket_${t.id}`)]);
+      }
+      if (isLast) {
+        buttons.push([Markup.button.callback('🔙 Назад', 'create_ticket')]);
+      }
+
+      await ctx.reply(
+        `${statusIcon} **Тикет #${t.id} ${statusText}** — ${t.topic}\n` +
+        `💬 ${t.message}\n` +
+        `📅 ${t.createdAt.toISOString().replace('T', ' ').slice(0, 19)}` +
+        replyText,
+        { parse_mode: 'Markdown', ...Markup.inlineKeyboard(buttons) },
+      );
+    }
+
+  }
+
+  /** Show closed tickets */
+  @Action('closed_tickets')
+  async onClosedTickets(@Ctx() ctx: Context) {
+    await ctx.answerCbQuery();
+    if (!this.checkActionSpam(ctx, ctx.from!.id)) return;
+    if (!(await this.checkActive(ctx))) return;
+
+    const tgUser = ctx.from!;
+    const tickets = await this.ticketService.findByUserId(tgUser.id);
+    const closed = tickets.filter((t) => t.status === 'closed');
+
+    if (closed.length === 0) {
+      await ctx.reply('📭 Нет закрытых тикетов.', {
+        ...Markup.inlineKeyboard([[Markup.button.callback('🔙 Назад', 'create_ticket')]]),
+      });
+      return;
+    }
+
+    const shown = closed.slice(0, 5);
+    for (let idx = 0; idx < shown.length; idx++) {
+      const t = shown[idx];
+      const isLast = idx === shown.length - 1;
+      const replies: any[] = JSON.parse(t.replies || '[]');
+      const replyText = replies.length > 0
+        ? '\n📩 Ответы:\n' + replies.map((r: any) => `👤 ${r.userName}: ${r.message}`).join('\n')
+        : '';
+
+      const buttons: any[][] = [];
+      if (isLast) {
+        buttons.push([Markup.button.callback('🔙 Назад', 'create_ticket')]);
+      }
+
+      await ctx.reply(
+        `🔴 **Тикет #${t.id} Закрыт** — ${t.topic}\n` +
+        `💬 ${t.message}\n` +
+        `📅 ${t.createdAt.toISOString().replace('T', ' ').slice(0, 19)}` +
+        replyText,
+        { parse_mode: 'Markdown', ...Markup.inlineKeyboard(buttons) },
+      );
+    }
+  }
+
+  /** User replies to their ticket from notification */
+  @Action(/^user_reply_ticket_(\d+)$/)
+  async onUserReplyTicket(@Ctx() ctx: Context & { session: SessionData }) {
+    if (!this.checkActionSpam(ctx)) { await ctx.answerCbQuery().catch(() => {}); return; }
+    await ctx.answerCbQuery();
+    if (!(await this.checkActive(ctx))) return;
+
+    const match = (ctx as any).match;
+    const ticketId = parseInt(match[1], 10);
+    const ticket = await this.ticketService.findById(ticketId);
+
+    if (!ticket) {
+      await ctx.reply('❌ Тикет не найден.');
+      return;
+    }
+
+    const tgUser = ctx.from!;
+    const isAdmin = this.isAdminOrSupport(ctx);
+    if (ticket.userId !== tgUser.id && !isAdmin) {
+      await ctx.answerCbQuery('⛔ Нет доступа.');
+      return;
+    }
+
+    // Users can only reply after support has responded
+    if (!isAdmin) {
+      const replies: any[] = JSON.parse(ticket.replies || '[]');
+      if (replies.length === 0) {
+        await ctx.reply('⏳ Дождитесь ответа поддержки перед отправкой нового сообщения.');
+        return;
+      }
+      const lastReply = replies[replies.length - 1];
+      if (lastReply.userId === tgUser.id) {
+        await ctx.reply('⏳ Дождитесь ответа поддержки перед отправкой нового сообщения.');
+        return;
+      }
+    }
+
+    ctx.session.ticketAdmin = { ticketId, action: 'reply' };
+    await ctx.reply(
+      '📝 Введите **ответ** на тикет:',
+      {
+        parse_mode: 'Markdown',
+        ...Markup.inlineKeyboard([
+          [Markup.button.callback('❌ Отменить', 'cancel_action')],
+        ]),
+      },
+    );
+  }
+
+  /** User closes their own ticket */
+  @Action(/^close_my_ticket_(\d+)$/)
+  async onCloseMyTicket(@Ctx() ctx: Context) {
+    if (!this.checkActionSpam(ctx)) { await ctx.answerCbQuery().catch(() => {}); return; }
+    await ctx.answerCbQuery();
+    if (!(await this.checkActive(ctx))) return;
+
+    const match = (ctx as any).match;
+    const ticketId = parseInt(match[1], 10);
+    const ticket = await this.ticketService.findById(ticketId);
+
+    if (!ticket) {
+      await ctx.reply('❌ Тикет не найден.');
+      return;
+    }
+
+    const tgUser = ctx.from!;
+    if (ticket.userId !== tgUser.id && !this.checkAdmin(ctx) && !this.checkSupport(ctx)) {
+      await ctx.answerCbQuery('⛔ Нет доступа.');
+      return;
+    }
+
+    await this.ticketService.close(ticketId);
+    await ctx.reply('🔴 Тикет закрыт.');
+    // Refresh tickets list
+    await this.onMyTicketsList(ctx);
+  }
+
+  @Action('admin_tickets')
+  async onAdminTickets(@Ctx() ctx: Context) {
+    if (!this.checkActionSpam(ctx)) { await ctx.answerCbQuery().catch(() => {}); return; }
+    await ctx.answerCbQuery();
+    await this.showAdminTickets(ctx);
+  }
+
+  /** Shared admin tickets list (no answerCbQuery) */
+  private async showAdminTickets(ctx: Context) {
+    if (!this.checkAdmin(ctx) && !this.checkSupport(ctx)) return;
+
+    const tickets = await this.ticketService.findOpen();
+    if (tickets.length === 0) {
+      await ctx.reply('✅ Нет открытых тикетов.');
+      return;
+    }
+
+    // Sort by createdAt ascending (oldest first)
+    tickets.sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime());
+
+    const buttons: any[][] = tickets.slice(0, 10).map((t) => [
+      Markup.button.callback(`#${t.id} [ID:${t.userId}]: ${t.topic.slice(0, 25)}`, `viewticket_${t.id}`),
+    ]);
+
+    await ctx.reply('🛟 **Тикеты пользователей**', {
+      parse_mode: 'Markdown',
+      ...Markup.inlineKeyboard(buttons),
+    });
+  }
+
+  @Action(/^viewticket_(\d+)$/)
+  async onViewTicket(@Ctx() ctx: Context & { session: SessionData }) {
+    if (!this.checkActionSpam(ctx)) { await ctx.answerCbQuery().catch(() => {}); return; }
+    await ctx.answerCbQuery();
+    if (!this.checkAdmin(ctx) && !this.checkSupport(ctx)) return;
+
+    const match = (ctx as any).match;
+    const ticketId = parseInt(match[1], 10);
+    const ticket = await this.ticketService.findById(ticketId);
+
+    if (!ticket) {
+      await ctx.reply('❌ Тикет не найден.');
+      return;
+    }
+
+    const replies: any[] = JSON.parse(ticket.replies || '[]');
+    let replyText = replies.length > 0
+      ? '\n📩 Ответы:\n' + replies.map((r: any) => `👤 ${r.userName}: ${r.message}`).join('\n')
+      : '\n📩 Ответов пока нет';
+
+    const stIcon = ticket.status === 'open' ? '🟢' : '🔴';
+    const stText = ticket.status === 'open' ? 'Открыт' : 'Закрыт';
+
+    const buttons: any[][] = [];
+    if (ticket.status === 'open') {
+      buttons.push([Markup.button.callback('📝 Ответить', `replyticket_${ticket.id}`)]);
+      buttons.push([Markup.button.callback('🔴 Закрыть тикет', `closeticket_${ticket.id}`)]);
+    }
+    buttons.push([Markup.button.callback('🔙 К списку тикетов', 'admin_tickets')]);
+
+    await ctx.reply(
+      `${stIcon} **Тикет #${ticket.id} ${stText}**\n` +
+      `👤 ID пользователя: \`${ticket.userId}\`\n` +
+      `📌 Тема: ${ticket.topic}\n` +
+      `💬 Сообщение: ${ticket.message}\n` +
+      `📅 ${ticket.createdAt.toISOString().replace('T', ' ').slice(0, 19)}` +
+      replyText,
+      {
+        parse_mode: 'Markdown',
+        ...Markup.inlineKeyboard(buttons),
+      },
+    );
+  }
+
+  /** Admin: start reply flow */
+  @Action(/^replyticket_(\d+)$/)
+  async onReplyTicket(@Ctx() ctx: Context & { session: SessionData }) {
+    if (!this.checkActionSpam(ctx)) { await ctx.answerCbQuery().catch(() => {}); return; }
+    await ctx.answerCbQuery();
+    if (!this.checkAdmin(ctx) && !this.checkSupport(ctx)) return;
+
+    const match = (ctx as any).match;
+    const ticketId = parseInt(match[1], 10);
+
+    ctx.session.ticketAdmin = { ticketId, action: 'reply' };
+    await ctx.reply(
+      '📝 Введите **ответ** на тикет:',
+      {
+        parse_mode: 'Markdown',
+        ...Markup.inlineKeyboard([
+          [Markup.button.callback('❌ Отменить', 'cancel_action')],
+        ]),
+      },
+    );
+  }
+
+  @Action(/^closeticket_(\d+)$/)
+  async onCloseTicket(@Ctx() ctx: Context & { session: SessionData }) {
+    if (!this.checkActionSpam(ctx)) { await ctx.answerCbQuery().catch(() => {}); return; }
+    await ctx.answerCbQuery();
+    if (!this.checkAdmin(ctx) && !this.checkSupport(ctx)) return;
+
+    const match = (ctx as any).match;
+    const ticketId = parseInt(match[1], 10);
+
+    ctx.session.ticketAdmin = { ticketId, action: 'close' };
+    await ctx.reply(
+      '🔴 Введите **причину закрытия** тикета:',
+      {
+        parse_mode: 'Markdown',
+        ...Markup.inlineKeyboard([
+          [Markup.button.callback('❌ Отменить', 'cancel_action')],
+        ]),
+      },
+    );
+  }
+
+  /** Check if user is admin or support — no side effects (no error messages) */
+  private isAdminOrSupport(ctx: Context): boolean {
+    const tgUser = ctx.from;
+    if (!tgUser) return false;
+    return this.userService.isAdmin(tgUser.id) || this.botService.getSupportIds().includes(tgUser.id);
+  }
+
+  /** Check if user is support staff */
+  private checkSupport(ctx: Context): boolean {
+    const tgUser = ctx.from;
+    if (!tgUser) return false;
+    const ids = this.botService.getSupportIds();
+    return ids.includes(tgUser.id);
+  }
+
+  /** Create ticket and notify support */
+  private async handleTicketCreate(ctx: Context, topic: string, message: string) {
+    const tgUser = ctx.from!;
+    const ticket = await this.ticketService.create({
+      userId: tgUser.id,
+      topic,
+      message,
+    });
+
+    // Notify support staff
+    const supportIds = this.botService.getSupportIds();
+    const userName = tgUser.first_name || tgUser.username || `ID ${tgUser.id}`;
+    for (const sid of supportIds) {
+      try {
+        await ctx.telegram.sendMessage(
+          sid,
+          `🛟 **Новый тикет #${ticket.id}**\n` +
+          `👤 ${userName} (\`${tgUser.id}\`)\n` +
+          `📌 ${topic}\n` +
+          `💬 ${message}`,
+          {
+            parse_mode: 'Markdown',
+            ...Markup.inlineKeyboard([
+              [Markup.button.callback('📝 Ответить', `viewticket_${ticket.id}`)],
+            ]),
+          },
+        );
+      } catch (_) {}
+    }
+    // Redirect back to support menu
+    await this.showSupportMenu(ctx);
+  }
+
   @Hears('🎁 Реферальная программа')
   async onKeyboardReferral(@Ctx() ctx: Context) {
     if (!(await this.checkActive(ctx))) return;
@@ -370,7 +868,12 @@ export class BotUpdate {
       '🏆 **Реферальная программа**\n\n' +
       'Пригласите друга и получите бонусы!\n\n' +
       '🚧 Раздел в разработке.',
-      { parse_mode: 'Markdown' },
+      {
+        parse_mode: 'Markdown',
+        ...Markup.inlineKeyboard([
+          [Markup.button.callback('🔙 Назад', 'my_subscription')],
+        ]),
+      },
     );
   }
 
@@ -444,6 +947,7 @@ export class BotUpdate {
   @Action('balance')
   async onBalance(@Ctx() ctx: Context) {
     await ctx.answerCbQuery();
+    if (!this.checkActionSpam(ctx, ctx.from!.id)) return;
     if (!(await this.checkActive(ctx))) return;
 
     const tgUser = ctx.from!;
@@ -458,6 +962,7 @@ export class BotUpdate {
   @Action('my_subscription')
   async onMySubscription(@Ctx() ctx: Context) {
     await ctx.answerCbQuery();
+    if (!this.checkActionSpam(ctx, ctx.from!.id)) return;
     if (!(await this.checkActive(ctx))) return;
 
     const tgUser = ctx.from!;
@@ -471,6 +976,7 @@ export class BotUpdate {
 
   @Action('buy')
   async onBuy(@Ctx() ctx: Context) {
+    if (!this.checkActionSpam(ctx)) { await ctx.answerCbQuery().catch(() => {}); return; }
     await ctx.answerCbQuery();
     if (!(await this.checkActive(ctx))) return;
 
@@ -480,6 +986,7 @@ export class BotUpdate {
   /** User selected a plan to buy with balance */
   @Action(/^buyplan_(\d+)$/)
   async onBuyPlan(@Ctx() ctx: Context) {
+    if (!this.checkActionSpam(ctx)) { await ctx.answerCbQuery().catch(() => {}); return; }
     await ctx.answerCbQuery();
     if (!(await this.checkActive(ctx))) return;
 
@@ -491,6 +998,7 @@ export class BotUpdate {
   /** Show top-up page with payment addresses */
   @Action('top_up')
   async onTopUp(@Ctx() ctx: Context) {
+    if (!this.checkActionSpam(ctx)) { await ctx.answerCbQuery().catch(() => {}); return; }
     await ctx.answerCbQuery();
     if (!(await this.checkActive(ctx))) return;
 
@@ -501,6 +1009,7 @@ export class BotUpdate {
 
   @Action('i_paid')
   async onIPaid(@Ctx() ctx: Context & { session: SessionData }) {
+    if (!this.checkActionSpam(ctx)) { await ctx.answerCbQuery().catch(() => {}); return; }
     await ctx.answerCbQuery();
     if (!(await this.checkActive(ctx))) return;
 
@@ -510,6 +1019,7 @@ export class BotUpdate {
 
   @Action(/^dep_currency_(BTC|USDT|GRAM)$/)
   async onDepositCurrency(@Ctx() ctx: Context & { session: SessionData }) {
+    if (!this.checkActionSpam(ctx)) { await ctx.answerCbQuery().catch(() => {}); return; }
     await ctx.answerCbQuery();
     if (!(await this.checkActive(ctx))) return;
 
@@ -523,6 +1033,7 @@ export class BotUpdate {
 
   @Action('pending_deposits')
   async onPendingDeposits(@Ctx() ctx: Context) {
+    if (!this.checkActionSpam(ctx)) { await ctx.answerCbQuery().catch(() => {}); return; }
     await ctx.answerCbQuery();
     if (!this.checkAdmin(ctx)) return;
     await this.botService.showPendingDeposits(ctx);
@@ -530,6 +1041,7 @@ export class BotUpdate {
 
   @Action(/^confdep_(\d+)$/)
   async onConfirmDeposit(@Ctx() ctx: Context) {
+    if (!this.checkActionSpam(ctx)) { await ctx.answerCbQuery().catch(() => {}); return; }
     await ctx.answerCbQuery();
     if (!this.checkAdmin(ctx)) return;
 
@@ -559,6 +1071,7 @@ export class BotUpdate {
 
   @Action(/^rejdep_(\d+)$/)
   async onRejectDeposit(@Ctx() ctx: Context) {
+    if (!this.checkActionSpam(ctx)) { await ctx.answerCbQuery().catch(() => {}); return; }
     await ctx.answerCbQuery();
     if (!this.checkAdmin(ctx)) return;
 
@@ -575,15 +1088,17 @@ export class BotUpdate {
   /** Show "Профиль" page */
   @Action('vpn_config')
   async onVpnConfig(@Ctx() ctx: Context) {
+    if (!this.checkActionSpam(ctx)) { await ctx.answerCbQuery().catch(() => {}); return; }
     await ctx.answerCbQuery();
     if (!(await this.checkActive(ctx))) return;
     if (!(await this.checkSubscription(ctx))) return;
-    await this.botService.showProfile(ctx);
+    await this.botService.showVpnKeys(ctx);
   }
 
   /** Show list of keys for config */
   @Action('vpn_keys')
   async onVpnKeys(@Ctx() ctx: Context) {
+    if (!this.checkActionSpam(ctx)) { await ctx.answerCbQuery().catch(() => {}); return; }
     await ctx.answerCbQuery();
     if (!(await this.checkActive(ctx))) return;
     if (!(await this.checkSubscription(ctx))) return;
@@ -593,6 +1108,7 @@ export class BotUpdate {
   /** Show actions for a specific key */
   @Action(/^keycfg_(\d+)$/)
   async onKeyConfig(@Ctx() ctx: Context) {
+    if (!this.checkActionSpam(ctx)) { await ctx.answerCbQuery().catch(() => {}); return; }
     await ctx.answerCbQuery();
     if (!(await this.checkActive(ctx))) return;
     if (!(await this.checkSubscription(ctx))) return;
@@ -663,6 +1179,63 @@ export class BotUpdate {
     );
   }
 
+  /** Delete key: confirmation step */
+  @Action(/^delkey_(\d+)$/)
+  async onDeleteKeyConfirm(@Ctx() ctx: Context) {
+    if (!this.checkActionSpam(ctx)) { await ctx.answerCbQuery().catch(() => {}); return; }
+    await ctx.answerCbQuery();
+    if (!(await this.checkActive(ctx))) return;
+
+    const match = (ctx as any).match;
+    const keyId = parseInt(match[1], 10);
+    const key = await this.botService.getVpnKey(keyId);
+    if (!key) { await ctx.reply('❌ Ключ не найден.'); return; }
+
+    await ctx.reply(
+      `⚠️ **Удаление ключа Key${key.keyIndex}**\n\n` +
+      `Это действие **необратимо**!\n\n` +
+      `• Средства на баланс **не возвращаются**\n` +
+      `• Мы **не храним** Ваши личные данные\n` +
+      `• Восстановление **невозможно** ввиду отсутствия копий\n\n` +
+      `Вы уверены?`,
+      {
+        parse_mode: 'Markdown',
+        ...Markup.inlineKeyboard([
+          [Markup.button.callback('✅ Да, удалить', `confirmdel_${key.id}`)],
+          [Markup.button.callback('❌ Нет', `keycfg_${key.id}`)],
+        ]),
+      },
+    );
+  }
+
+  /** Execute key deletion */
+  @Action(/^confirmdel_(\d+)$/)
+  async onDeleteKeyExecute(@Ctx() ctx: Context) {
+    if (!this.checkActionSpam(ctx)) { await ctx.answerCbQuery().catch(() => {}); return; }
+    await ctx.answerCbQuery();
+    if (!(await this.checkActive(ctx))) return;
+
+    const match = (ctx as any).match;
+    const keyId = parseInt(match[1], 10);
+    const key = await this.botService.getVpnKey(keyId);
+    if (!key) { await ctx.reply('❌ Ключ не найден.'); return; }
+
+    // Verify ownership or admin
+    const tgUser = ctx.from!;
+    const dbUser = await this.userService.findByTelegramId(tgUser.id);
+    if (!dbUser || (key.userId !== dbUser.id && !this.userService.isAdmin(tgUser.id))) {
+      await ctx.reply('⛔ Нет доступа.');
+      return;
+    }
+
+    // Delete from AmneziaWG
+    await this.botService.deleteKey(key);
+    await ctx.reply(`🗑 Ключ **Key${key.keyIndex}** удалён.`, { parse_mode: 'Markdown' });
+
+    // Show updated subscription page
+    await this.botService.showMySubscription(ctx, dbUser);
+  }
+
   @Action(/^otlink_(\d+)$/)
   async onOneTimeLink(@Ctx() ctx: Context & { session: SessionData }) {
     this.safeAnswerCbQuery(ctx);
@@ -697,6 +1270,7 @@ export class BotUpdate {
 
   @Action('wizard_test')
   async wizardTest(@Ctx() ctx: Context): Promise<void> {
+    if (!this.checkActionSpam(ctx)) { await ctx.answerCbQuery().catch(() => {}); return; }
     await ctx.answerCbQuery();
     if (!(await this.checkActive(ctx))) return;
     await (ctx as any).scene.enter(WIZARD_SCENE_ID);
@@ -704,6 +1278,7 @@ export class BotUpdate {
 
   @Action('scene_test')
   async sceneTest(@Ctx() ctx: Context): Promise<void> {
+    if (!this.checkActionSpam(ctx)) { await ctx.answerCbQuery().catch(() => {}); return; }
     await ctx.answerCbQuery();
     if (!(await this.checkActive(ctx))) return;
     await (ctx as any).scene.enter(RND_SCENE_ID);
@@ -731,6 +1306,7 @@ export class BotUpdate {
 
   @Action(/^activate_(\d+)$/)
   async onActivateUser(@Ctx() ctx: Context) {
+    if (!this.checkActionSpam(ctx)) { await ctx.answerCbQuery().catch(() => {}); return; }
     await ctx.answerCbQuery();
     await this.handleActivateUser(ctx);
   }
@@ -738,6 +1314,7 @@ export class BotUpdate {
   /** Show users awaiting activation (admin) */
   @Action('pending_users')
   async onPendingUsers(@Ctx() ctx: Context) {
+    if (!this.checkActionSpam(ctx)) { await ctx.answerCbQuery().catch(() => {}); return; }
     await ctx.answerCbQuery();
     if (!this.checkAdmin(ctx)) return;
     await this.botService.showPendingUsers(ctx);
@@ -747,6 +1324,7 @@ export class BotUpdate {
 
   @Action('edit_users')
   async onEditUsers(@Ctx() ctx: Context) {
+    if (!this.checkActionSpam(ctx)) { await ctx.answerCbQuery().catch(() => {}); return; }
     await ctx.answerCbQuery();
     if (!this.checkAdmin(ctx)) return;
     await this.botService.showEditUsersList(ctx);
@@ -754,6 +1332,7 @@ export class BotUpdate {
 
   @Action(/^edit_user_(\d+)$/)
   async onEditUser(@Ctx() ctx: Context) {
+    if (!this.checkActionSpam(ctx)) { await ctx.answerCbQuery().catch(() => {}); return; }
     await ctx.answerCbQuery();
     if (!this.checkAdmin(ctx)) return;
 
@@ -771,6 +1350,7 @@ export class BotUpdate {
 
   @Action(/^ef_(\w+)_(\d+)$/)
   async onEditField(@Ctx() ctx: Context & { session: SessionData }) {
+    if (!this.checkActionSpam(ctx)) { await ctx.answerCbQuery().catch(() => {}); return; }
     await ctx.answerCbQuery();
     if (!this.checkAdmin(ctx)) return;
 
@@ -807,6 +1387,7 @@ export class BotUpdate {
 
   @Action(/^er_(admin|user)_(\d+)$/)
   async onSetRole(@Ctx() ctx: Context) {
+    if (!this.checkActionSpam(ctx)) { await ctx.answerCbQuery().catch(() => {}); return; }
     await ctx.answerCbQuery();
     if (!this.checkAdmin(ctx)) return;
 
@@ -827,6 +1408,7 @@ export class BotUpdate {
 
   @Action(/^ea_(true|false)_(\d+)$/)
   async onSetActive(@Ctx() ctx: Context) {
+    if (!this.checkActionSpam(ctx)) { await ctx.answerCbQuery().catch(() => {}); return; }
     await ctx.answerCbQuery();
     if (!this.checkAdmin(ctx)) return;
 
@@ -854,6 +1436,7 @@ export class BotUpdate {
   /** Admin: add 7 days to user subscription */
   @Action(/^subadd_(\d+)$/)
   async onSubAdd(@Ctx() ctx: Context) {
+    if (!this.checkActionSpam(ctx)) { await ctx.answerCbQuery().catch(() => {}); return; }
     await ctx.answerCbQuery();
     if (!this.checkAdmin(ctx)) return;
 
@@ -889,6 +1472,7 @@ export class BotUpdate {
   /** Open subscription management for a user (admin) */
   @Action(/^submgmt_(\d+)$/)
   async onSubMgmt(@Ctx() ctx: Context) {
+    if (!this.checkActionSpam(ctx)) { await ctx.answerCbQuery().catch(() => {}); return; }
     await ctx.answerCbQuery();
     if (!this.checkAdmin(ctx)) return;
 
@@ -907,6 +1491,7 @@ export class BotUpdate {
   /** Toggle AmneziaWG client enable/disable (admin) */
   @Action(/^togclient_(\d+)_(enable|disable)$/)
   async onToggleClient(@Ctx() ctx: Context) {
+    if (!this.checkActionSpam(ctx)) { await ctx.answerCbQuery().catch(() => {}); return; }
     await ctx.answerCbQuery();
     if (!this.checkAdmin(ctx)) return;
 
@@ -934,6 +1519,7 @@ export class BotUpdate {
 
   @Action(/^cancel_edit/)
   async onCancelEdit(@Ctx() ctx: Context & { session: SessionData }) {
+    if (!this.checkActionSpam(ctx)) { await ctx.answerCbQuery().catch(() => {}); return; }
     await ctx.answerCbQuery();
     ctx.session.awaitingEditField = undefined;
     await this.botService.showEditUsersList(ctx);
@@ -943,6 +1529,7 @@ export class BotUpdate {
 
   @Action(/^del_(\d+)$/)
   async onDeleteUser(@Ctx() ctx: Context) {
+    if (!this.checkActionSpam(ctx)) { await ctx.answerCbQuery().catch(() => {}); return; }
     await ctx.answerCbQuery();
     if (!this.checkAdmin(ctx)) return;
 
@@ -972,6 +1559,7 @@ export class BotUpdate {
 
   @Action(/^delyes_(\d+)$/)
   async onDeleteConfirm(@Ctx() ctx: Context) {
+    if (!this.checkActionSpam(ctx)) { await ctx.answerCbQuery().catch(() => {}); return; }
     await ctx.answerCbQuery();
     if (!this.checkAdmin(ctx)) return;
 
@@ -992,6 +1580,7 @@ export class BotUpdate {
 
   @Action(/^delno_(\d+)$/)
   async onDeleteCancel(@Ctx() ctx: Context) {
+    if (!this.checkActionSpam(ctx)) { await ctx.answerCbQuery().catch(() => {}); return; }
     await ctx.answerCbQuery();
     if (!this.checkAdmin(ctx)) return;
 
@@ -1028,6 +1617,111 @@ export class BotUpdate {
         return;
       }
 
+      // ── /cancel during ticket flow ─────────────────────────
+      if (text === '/cancel' && ctx.session?.ticketFlow) {
+        ctx.session.ticketFlow = undefined;
+        await ctx.reply('❌ Создание тикета отменено.');
+        return;
+      }
+
+      // ── Ticket flow: topic → message ───────────────────────
+      if (ctx.session?.ticketFlow?.step === 'topic') {
+        const topic = text.trim();
+        const tMin = parseInt(process.env.TICKET_TOPIC_MIN || '3', 10);
+        const tMax = parseInt(process.env.TICKET_TOPIC_MAX || '10', 10);
+        if (topic.length < tMin || topic.length > tMax) {
+          await ctx.reply(`❌ Тема должна быть от ${tMin} до ${tMax} символов. Попробуйте ещё раз:`);
+          return;
+        }
+        ctx.session.ticketFlow.topic = topic;
+        ctx.session.ticketFlow.step = 'message';
+        await ctx.reply('📝 Введите **сообщение** обращения:', {
+          parse_mode: 'Markdown',
+          ...Markup.inlineKeyboard([
+            [Markup.button.callback('❌ Отменить', 'cancel_action')],
+          ]),
+        });
+        return;
+      }
+
+      if (ctx.session?.ticketFlow?.step === 'message') {
+        const msg = text.trim();
+        const mMin = parseInt(process.env.TICKET_MSG_MIN || '10', 10);
+        const mMax = parseInt(process.env.TICKET_MSG_MAX || '150', 10);
+        if (msg.length < mMin || msg.length > mMax) {
+          await ctx.reply(`❌ Сообщение должно быть от ${mMin} до ${mMax} символов. Попробуйте ещё раз:`);
+          return;
+        }
+        await this.handleTicketCreate(ctx, ctx.session.ticketFlow!.topic!, msg);
+        ctx.session.ticketFlow = undefined;
+        return;
+      }
+
+      // ── Admin/User ticket action (reply/close) ─────────────
+      if (ctx.session?.ticketAdmin) {
+        const { ticketId, action } = ctx.session.ticketAdmin;
+        ctx.session.ticketAdmin = undefined;
+        const input = text.trim();
+        const tgUser = ctx.from!;
+
+        if (action === 'reply') {
+          const reply = {
+            userId: tgUser.id,
+            userName: tgUser.first_name || tgUser.username || `ID ${tgUser.id}`,
+            message: input,
+            createdAt: new Date().toISOString(),
+          };
+
+          const updated = await this.ticketService.addReply(ticketId, reply);
+          if (updated) {
+            await ctx.reply('✅ Ответ добавлен.');
+            // Notify the other party
+            const notifyId = updated.userId === tgUser.id
+              ? (this.botService.getSupportIds().find(() => true) || updated.userId)
+              : updated.userId;
+            try {
+              await ctx.telegram.sendMessage(
+                notifyId,
+                `📩 **Новый ответ в тикете #${updated.id}**\n\n` +
+                `📌 Тема: ${updated.topic}\n` +
+                `👤 ${reply.userName}: ${reply.message}`,
+                {
+                  parse_mode: 'Markdown',
+                  ...Markup.inlineKeyboard([
+                    [Markup.button.callback('📝 Ответить', `user_reply_ticket_${updated.id}`)],
+                  ]),
+                },
+              );
+            } catch (_) {}
+          }
+
+          // Return to appropriate view
+          if (this.isAdminOrSupport(ctx)) {
+            ctx.session.awaitingEditField = { userId: ticketId, field: 'ticket_reply' as any };
+            await this.onViewTicket(ctx as any);
+            ctx.session.awaitingEditField = undefined;
+          } else {
+            await this.showSupportMenu(ctx);
+          }
+        } else if (action === 'close') {
+          const closed = await this.ticketService.close(ticketId);
+          if (closed) {
+            await ctx.reply('🔴 Тикет закрыт.');
+            try {
+              await ctx.telegram.sendMessage(
+                closed.userId,
+                `🔴 **Тикет #${closed.id} закрыт**\n\n` +
+                `📌 Тема: ${closed.topic}\n` +
+                `💬 Сообщение от поддержки: ${input}`,
+                { parse_mode: 'Markdown' },
+              );
+            } catch (_) {}
+          }
+          await this.showAdminTickets(ctx);
+        }
+        return;
+      }
+
       // ── Deposit TxID input ──────────────────────────────────
       if (ctx.session?.depositFlow?.step === 'txid') {
         await this.handleDepositTxId(ctx, text);
@@ -1060,9 +1754,11 @@ export class BotUpdate {
         return;
       }
 
-      // ── Echo for regular text ───────────────────────────────
-      const replyText = this.botService.processText(text);
-      await ctx.reply(replyText);
+      // ── Echo for regular text (respect ENABLE_AUTO_ANSWER) ──
+      if (process.env.ENABLE_AUTO_ANSWER !== 'false') {
+        const replyText = this.botService.processText(text);
+        await ctx.reply(replyText);
+      }
     }
   }
 
@@ -1075,6 +1771,7 @@ export class BotUpdate {
 
   @Action('seeusers')
   async onSeeUsersAction(@Ctx() ctx: Context) {
+    if (!this.checkActionSpam(ctx)) { await ctx.answerCbQuery().catch(() => {}); return; }
     await ctx.answerCbQuery();
     await this.handleSeeUsers(ctx);
   }
@@ -1237,6 +1934,44 @@ export class BotUpdate {
   /** Process edit field text input */
   private async handleEditFieldInput(ctx: Context & { session: SessionData }, text: string) {
     const { userId, field } = ctx.session.awaitingEditField!;
+
+    // ── Ticket reply (before user lookup — userId is ticketId here) ──
+    if (field === 'ticket_reply') {
+      const ticketId = userId;
+      const replyMsg = text.trim();
+      const tgUser = ctx.from!;
+      const reply = {
+        userId: tgUser.id,
+        userName: tgUser.first_name || tgUser.username || `ID ${tgUser.id}`,
+        message: replyMsg,
+        createdAt: new Date().toISOString(),
+      };
+
+      const updated = await this.ticketService.addReply(ticketId, reply);
+      if (!updated) {
+        await ctx.reply('❌ Тикет не найден.');
+        ctx.session.awaitingEditField = undefined;
+        return;
+      }
+
+      await ctx.reply('✅ Ответ добавлен.');
+
+      try {
+        await ctx.telegram.sendMessage(
+          updated.userId,
+          `📩 **Новый ответ в тикете #${updated.id}**\n\n` +
+          `📌 Тема: ${updated.topic}\n` +
+          `👤 ${reply.userName}: ${reply.message}`,
+          { parse_mode: 'Markdown' },
+        );
+      } catch (_) {}
+
+      ctx.session.awaitingEditField = undefined;
+      // Redirect back to admin tickets list
+      await this.showAdminTickets(ctx);
+      return;
+    }
+
     const user = await this.userService.findById(userId);
 
     if (!user) {

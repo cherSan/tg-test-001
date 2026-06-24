@@ -6,6 +6,8 @@ import { DepositService } from '../../db/deposit.service';
 import { Deposit } from '../../db/entities/deposit.entity';
 import { VpnKeyService } from '../../db/vpn-key.service';
 import { VpnKey } from '../../db/entities/vpn-key.entity';
+import { TicketService } from '../../db/ticket.service';
+import { Ticket } from '../../db/entities/ticket.entity';
 import { AmneziaService } from '../../amnezia/amnezia.service';
 
 @Injectable()
@@ -20,7 +22,14 @@ export class BotService {
     private readonly depositService: DepositService,
     private readonly amneziaService: AmneziaService,
     private readonly vpnKeyService: VpnKeyService,
+    private readonly ticketService: TicketService,
   ) {}
+
+  /** Get support IDs from env */
+  getSupportIds(): number[] {
+    const raw = process.env.SUPPORT_IDS || process.env.ADMIN_IDS || '';
+    return raw.split(',').map((id) => parseInt(id.trim(), 10)).filter((id) => !isNaN(id));
+  }
 
   getWelcomeMessage(username: string): string {
     return `Привет, ${username}! Рад приветствовать тебя!.`;
@@ -52,8 +61,8 @@ export class BotService {
     ];
 
     buttons.push([
-      Markup.button.callback('Тест визарда', 'wizard_test'),
-      Markup.button.callback('Тест сцены', 'scene_test'),
+      // // Markup.button.callback('Тест визарда', 'wizard_test'),
+      // // Markup.button.callback('Тест сцены', 'scene_test'),
     ]);
 
     if (isAdmin) {
@@ -61,6 +70,7 @@ export class BotService {
       buttons.push([Markup.button.callback('⏳ Ожидают активации', 'pending_users')]);
       buttons.push([Markup.button.callback('💳 Ожидают пополнения', 'pending_deposits')]);
       buttons.push([Markup.button.callback('📝 Редактировать пользователей', 'edit_users')]);
+      buttons.push([Markup.button.callback('🛟 Тикеты', 'admin_tickets')]);
       buttons.push([Markup.button.callback('⚙️ Настройки', 'admin_settings')]);
     }
 
@@ -159,7 +169,6 @@ export class BotService {
           ? Markup.button.callback('🔴 Выключить автоактивацию', 'autoact_off')
           : Markup.button.callback('🟢 Включить автоактивацию', 'autoact_on'),
       ],
-      [Markup.button.callback('🔙 Назад', 'show_menu')],
     ];
 
     await ctx.reply(info, {
@@ -207,7 +216,6 @@ export class BotService {
       buttons.push([Markup.button.callback('🔌 Оформить подписку', 'buy')]);
     }
     buttons.push([Markup.button.callback('💳 Пополнить баланс', 'top_up')]);
-    buttons.push([Markup.button.callback('🔙 Назад', 'show_menu')]);
 
     await ctx.reply(message, {
       parse_mode: 'Markdown',
@@ -250,16 +258,18 @@ export class BotService {
       message = `📋 **Мои подписки**\n\n❌ Нет активных ключей`;
     }
 
-    const buttons: any[][] = [
-      [Markup.button.callback('🔌 Оформить подписку', 'buy')],
-      [Markup.button.callback('💳 Пополнить баланс', 'top_up')],
-    ];
+    const buttons: any[][] = [];
 
     if (activeKeys.length > 0) {
-      buttons.push([Markup.button.callback('🔐 Профиль', 'vpn_config')]);
+      buttons.push([Markup.button.callback('🔐 Конфигурации VPN', 'vpn_config')]);
     }
-
-    buttons.push([Markup.button.callback('🔙 Назад', 'show_menu')]);
+    buttons.push([Markup.button.callback('🔌 Оформить подписку', 'buy')]);
+    buttons.push([Markup.button.callback('💳 Пополнить баланс', 'top_up')]);
+    buttons.push([
+      Markup.button.callback('🎁 Подарить подписку', 'gift_sub'),
+      Markup.button.callback('👥 Пригласить друга', 'invite_friend'),
+    ]);
+    buttons.push([Markup.button.callback('🛟 Техподдержка', 'create_ticket')]);
 
     await ctx.reply(message, {
       parse_mode: 'Markdown',
@@ -401,13 +411,12 @@ export class BotService {
       `💳 **Пополнение баланса**\n\n` +
       `Отправьте криптовалюту на один из адресов:\n\n` +
       addrText +
-      `\nПосле отправки нажмите «✅ Я оплатил» и укажите TxID.`;
+      `\nПосле отправки нажмите «💳 Завершение пополнения» и укажите TxID.`;
 
     await ctx.reply(message, {
       parse_mode: 'Markdown',
       ...Markup.inlineKeyboard([
-        [Markup.button.callback('✅ Я оплатил', 'i_paid')],
-        [Markup.button.callback('🔙 Назад', 'show_menu')],
+        [Markup.button.callback('💳 Завершение пополнения', 'i_paid')],
       ]),
     });
   }
@@ -465,6 +474,13 @@ export class BotService {
   /** Get a VpnKey by id */
   async getVpnKey(keyId: number): Promise<VpnKey | null> {
     return this.vpnKeyService.findById(keyId);
+  }
+
+  /** Delete a key: AmneziaWG client + DB record */
+  async deleteKey(key: VpnKey): Promise<void> {
+    await this.amneziaService.deleteClient(key.peerId);
+    await this.vpnKeyService.delete(key.id);
+    this.logger.log(`Deleted Key${key.keyIndex} (peer=${key.peerId})`);
   }
 
   /** Get all keys for a user */
@@ -548,7 +564,7 @@ export class BotService {
     const { key } = result;
     const expiryStr = this.formatMskDate(key.subscriptionExpiresAt!);
     const vpnButton = Markup.inlineKeyboard([
-      [Markup.button.callback('🔐 Профиль', 'vpn_config')],
+      [Markup.button.callback('🔐 Конфигурации VPN', 'vpn_config')],
       [Markup.button.callback('🔙 В меню', 'show_menu')],
     ]);
 
@@ -590,7 +606,6 @@ export class BotService {
       return [Markup.button.callback(label, `edit_user_${u.telegramId}`)];
     });
 
-    buttons.push([Markup.button.callback('🔙 Назад', 'show_menu')]);
 
     const message = `⏳ **Ожидают активации** (${users.length}):`;
     await ctx.reply(message, {
@@ -766,7 +781,7 @@ export class BotService {
 
     if (activeKeys.length === 0) {
       await ctx.reply('❌ Нет активных ключей.', {
-        ...Markup.inlineKeyboard([[Markup.button.callback('🔙 Назад', 'vpn_config')]]),
+        ...Markup.inlineKeyboard([[Markup.button.callback('🔙 Назад', 'my_subscription')]]),
       });
       return;
     }
@@ -779,7 +794,7 @@ export class BotService {
       )];
     });
 
-    buttons.push([Markup.button.callback('🔙 Назад', 'vpn_config')]);
+    buttons.push([Markup.button.callback('🔙 Назад', 'my_subscription')]);
 
     await ctx.reply('🔐 **Конфигурации VPN**\n\nВыберите ключ:', {
       parse_mode: 'Markdown',
@@ -806,6 +821,7 @@ export class BotService {
         [Markup.button.callback('📥 Скачать конфигурацию', `getlink_${key.id}`)],
         [Markup.button.callback('📱 Получить QRcode', `getqr_${key.id}`)],
         [Markup.button.callback('🔗 Одноразовая ссылка', `otlink_${key.id}`)],
+        [Markup.button.callback('🗑 Удалить ключ', `delkey_${key.id}`)],
         [Markup.button.callback('🔙 Назад', 'vpn_keys')],
       ]),
     });
@@ -829,12 +845,12 @@ export class BotService {
     }
 
     await ctx.reply(
-      '✅ **Я оплатил**\n\nВыберите валюту пополнения:',
+      '💳 **Завершение пополнения**\n\nВыберите валюту пополнения:',
       {
         parse_mode: 'Markdown',
         ...Markup.inlineKeyboard([
           ...currencyButtons,
-          [Markup.button.callback('🔙 Отмена', 'show_menu')],
+          [Markup.button.callback('❌ Отменить', 'cancel_action')],
         ]),
       },
     );
@@ -846,8 +862,13 @@ export class BotService {
       `📝 Введите **TxID** транзакции:\n\n` +
       `Пример: \`abc123def456...\`\n\n` +
       `Валюта: **${currency}**\n` +
-      `(отправьте /cancel для отмены)`,
-      { parse_mode: 'Markdown' },
+      `Нажмите ❌ Отменить для отмены`,
+      {
+        parse_mode: 'Markdown',
+        ...Markup.inlineKeyboard([
+          [Markup.button.callback('❌ Отменить', 'cancel_action')],
+        ]),
+      },
     );
   }
 

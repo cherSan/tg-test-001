@@ -31,6 +31,30 @@ export class BotService {
     return raw.split(',').map((id) => parseInt(id.trim(), 10)).filter((id) => !isNaN(id));
   }
 
+  /** Reply or edit: if called from a callback query, edit the original message; otherwise send new */
+  private async replyOrEdit(
+    ctx: Context,
+    text: string,
+    extra?: any,
+  ) {
+    const cb = (ctx as any).callbackQuery as any;
+    if (cb?.message) {
+      try {
+        await ctx.telegram.editMessageText(
+          cb.message.chat.id,
+          cb.message.message_id,
+          undefined,
+          text,
+          extra ?? {},
+        );
+        return;
+      } catch (_) {
+        // Edit failed → fall through to reply
+      }
+    }
+    await ctx.reply(text, extra as any);
+  }
+
   getWelcomeMessage(username: string): string {
     return `Привет, ${username}! Рад приветствовать тебя!.`;
   }
@@ -55,9 +79,9 @@ export class BotService {
         Markup.button.callback('💰 Баланс', 'balance'),
         Markup.button.callback('💳 Пополнить баланс', 'top_up'),
       ],
-      [
-        Markup.button.callback('📋 Мои подписки', 'my_subscription'),
-      ],
+      // [
+      //   Markup.button.callback('📋 Мои подписки', 'my_subscription'),
+      // ],
     ];
 
     buttons.push([
@@ -76,11 +100,11 @@ export class BotService {
 
     buttons.push([Markup.button.callback('Show menu', 'show_menu')]);
 
-    await ctx.reply('Main menu:', Markup.inlineKeyboard(buttons));
+    await this.replyOrEdit(ctx, 'Main menu:', Markup.inlineKeyboard(buttons));
   }
 
   async botMenu(ctx: Context) {
-    await ctx.reply(
+    await this.replyOrEdit(ctx, 
       'Используйте кнопки меню для навигации:',
       Markup.keyboard([
         ['🔌 Подключить VPN'],
@@ -92,7 +116,7 @@ export class BotService {
 
   /** Message shown to users waiting for activation */
   async sendPendingActivationMessage(ctx: Context) {
-    await ctx.reply(
+    await this.replyOrEdit(ctx, 
       '⏳ Ваш аккаунт ожидает активации администратором.\n' +
       'Пожалуйста, подождите — мы уведомим вас, когда доступ будет открыт.',
     );
@@ -100,7 +124,7 @@ export class BotService {
 
   /** Message shown to blocked users */
   async sendBlockedMessage(ctx: Context) {
-    await ctx.reply(
+    await this.replyOrEdit(ctx, 
       '🚫 Ваш аккаунт заблокирован администратором.\n' +
       'Доступ к функциям бота запрещён.',
     );
@@ -171,7 +195,7 @@ export class BotService {
       ],
     ];
 
-    await ctx.reply(info, {
+    await this.replyOrEdit(ctx, info, {
       parse_mode: 'Markdown',
       ...Markup.inlineKeyboard(buttons),
     });
@@ -182,7 +206,7 @@ export class BotService {
     const users = await this.userService.findAll();
 
     if (users.length === 0) {
-      await ctx.reply('📭 В базе пока нет пользователей.');
+      await this.replyOrEdit(ctx, '📭 В базе пока нет пользователей.');
       return;
     }
 
@@ -197,7 +221,7 @@ export class BotService {
     buttons.push([Markup.button.callback('🔙 Назад', 'seeusers')]);
 
     const message = `📝 **Выберите пользователя для редактирования** (${users.length}):`;
-    await ctx.reply(message, {
+    await this.replyOrEdit(ctx, message, {
       parse_mode: 'Markdown',
       ...Markup.inlineKeyboard(buttons),
     });
@@ -217,7 +241,7 @@ export class BotService {
     }
     buttons.push([Markup.button.callback('💳 Пополнить баланс', 'top_up')]);
 
-    await ctx.reply(message, {
+    await this.replyOrEdit(ctx, message, {
       parse_mode: 'Markdown',
       ...Markup.inlineKeyboard(buttons),
     });
@@ -253,9 +277,13 @@ export class BotService {
         const daysLeft = Math.ceil((new Date(k.subscriptionExpiresAt!).getTime() - now.getTime()) / 86400_000);
         keysText += `🔑 Key${k.keyIndex}: ✅ до **${this.formatMskDate(k.subscriptionExpiresAt!)}** (${daysLeft} дн.)\n`;
       }
-      message = `📋 **Мои подписки**\n\n${keysText}`;
+      message = `👤 **Профиль**\n\n${keysText}`;
     } else {
-      message = `📋 **Мои подписки**\n\n❌ Нет активных ключей`;
+      const balance = (user.userBalanceUSDT ?? 0).toFixed(2);
+      message =
+        `Уважаемый пользователь, у Вас сейчас нет действующих ключей, но Вы можете их оформить.\n\n` +
+        `💰 Ваш баланс: **${balance}** USDT\n\n` +
+        `Если Вы считаете, что это ошибка, для связи с поддержкой используйте Ваш ID: \`${user.telegramId}\``;
     }
 
     const buttons: any[][] = [];
@@ -265,13 +293,11 @@ export class BotService {
     }
     buttons.push([Markup.button.callback('🔌 Оформить подписку', 'buy')]);
     buttons.push([Markup.button.callback('💳 Пополнить баланс', 'top_up')]);
-    buttons.push([
-      Markup.button.callback('🎁 Подарить подписку', 'gift_sub'),
-      Markup.button.callback('👥 Пригласить друга', 'invite_friend'),
-    ]);
+    buttons.push([Markup.button.callback('🎁 Подарить подписку', 'gift_sub')]);
+    buttons.push([Markup.button.callback('👥 Пригласить друга', 'invite_friend')]);
     buttons.push([Markup.button.callback('🛟 Техподдержка', 'create_ticket')]);
 
-    await ctx.reply(message, {
+    await this.replyOrEdit(ctx, message, {
       parse_mode: 'Markdown',
       ...Markup.inlineKeyboard(buttons),
     });
@@ -389,7 +415,7 @@ export class BotService {
     planButtons.push([Markup.button.callback('💳 Пополнить баланс', 'top_up')]);
     planButtons.push([Markup.button.callback('🔙 Назад', 'my_subscription')]);
 
-    await ctx.reply(message, {
+    await this.replyOrEdit(ctx, message, {
       parse_mode: 'Markdown',
       ...Markup.inlineKeyboard(planButtons),
     });
@@ -413,7 +439,7 @@ export class BotService {
       addrText +
       `\nПосле отправки нажмите «💳 Завершение пополнения» и укажите TxID.`;
 
-    await ctx.reply(message, {
+    await this.replyOrEdit(ctx, message, {
       parse_mode: 'Markdown',
       ...Markup.inlineKeyboard([
         [Markup.button.callback('💳 Завершение пополнения', 'i_paid')],
@@ -494,7 +520,7 @@ export class BotService {
     const tgUser = ctx.from!;
     const dbUser = await this.userService.findByTelegramId(tgUser.id);
     if (!dbUser) {
-      await ctx.reply('❌ Пользователь не найден.');
+      await this.replyOrEdit(ctx, '❌ Пользователь не найден.');
       return false;
     }
 
@@ -502,7 +528,7 @@ export class BotService {
     const plans = this.getSubscriptionPlans({ btcUsdt: 0, tonUsdt: 0 });
     const plan = plans.find((p) => p.hours === planHours);
     if (!plan) {
-      await ctx.reply('❌ Тариф не найден.');
+      await this.replyOrEdit(ctx, '❌ Тариф не найден.');
       return false;
     }
 
@@ -512,7 +538,7 @@ export class BotService {
       const nextTrialAt = new Date(dbUser.lastTrialAt.getTime() + TRIAL_COOLDOWN_MS);
       if (nextTrialAt > new Date()) {
         const availableAt = this.formatMskDate(nextTrialAt);
-        await ctx.reply(
+        await this.replyOrEdit(ctx, 
           `❌ Пробный период уже был активирован.\n\n` +
           `📅 Последний триал: **${this.formatMskDate(dbUser.lastTrialAt)}**\n` +
           `⏳ Следующий доступен с: **${availableAt}**\n\n` +
@@ -525,7 +551,7 @@ export class BotService {
 
     // Check balance (skip for free plans)
     if (plan.usdt > 0 && (dbUser.userBalanceUSDT ?? 0) < plan.usdt) {
-      await ctx.reply(
+      await this.replyOrEdit(ctx, 
         `❌ Недостаточно средств!\n\n` +
         `Тариф: **${plan.usdt}** USDT\n` +
         `Ваш баланс: **${(dbUser.userBalanceUSDT ?? 0).toFixed(2)}** USDT\n\n` +
@@ -550,7 +576,7 @@ export class BotService {
     // Provision new key
     const result = await this.provisionKey(dbUser, planHours);
     if (!result) {
-      await ctx.reply(
+      await this.replyOrEdit(ctx, 
         `⚠️ Не удалось создать VPN-ключ. Администратор решит проблему.`,
         { parse_mode: 'Markdown' },
       );
@@ -570,7 +596,7 @@ export class BotService {
     ]);
 
     if (plan.usdt === 0) {
-      await ctx.reply(
+      await this.replyOrEdit(ctx, 
         `🎉 **${plan.label}** активирован!\n\n` +
         `🔑 **Key${key.keyIndex}** создан\n` +
         `📅 До: **${expiryStr}**\n` +
@@ -578,7 +604,7 @@ export class BotService {
         { parse_mode: 'Markdown', ...vpnButton },
       );
     } else {
-      await ctx.reply(
+      await this.replyOrEdit(ctx, 
         `✅ Подписка оплачена с баланса!\n\n` +
         `🔑 **Key${key.keyIndex}** создан\n` +
         `💸 Списано: **${plan.usdt}** USDT\n` +
@@ -597,7 +623,7 @@ export class BotService {
     const users = await this.userService.findPending();
 
     if (users.length === 0) {
-      await ctx.reply('✅ Нет пользователей, ожидающих активации.');
+      await this.replyOrEdit(ctx, '✅ Нет пользователей, ожидающих активации.');
       return;
     }
 
@@ -609,7 +635,7 @@ export class BotService {
 
 
     const message = `⏳ **Ожидают активации** (${users.length}):`;
-    await ctx.reply(message, {
+    await this.replyOrEdit(ctx, message, {
       parse_mode: 'Markdown',
       ...Markup.inlineKeyboard(buttons),
     });
@@ -675,7 +701,7 @@ export class BotService {
       ],
     ];
 
-    await ctx.reply(info, {
+    await this.replyOrEdit(ctx, info, {
       parse_mode: 'Markdown',
       ...Markup.inlineKeyboard(buttons),
     });
@@ -740,7 +766,7 @@ export class BotService {
       [Markup.button.callback('🔙 Назад', `edit_user_${user.telegramId}`)],
     ];
 
-    await ctx.reply(message, {
+    await this.replyOrEdit(ctx, message, {
       parse_mode: 'Markdown',
       ...Markup.inlineKeyboard(buttons),
     });
@@ -758,7 +784,7 @@ export class BotService {
 
   /** Show "Профиль" page */
   async showProfile(ctx: Context) {
-    await ctx.reply('🔐 **Профиль**\n\nВыберите раздел:', {
+    await this.replyOrEdit(ctx, '🔐 **Профиль**\n\nВыберите раздел:', {
       parse_mode: 'Markdown',
       ...Markup.inlineKeyboard([
         [Markup.button.callback('🔐 Конфигурации VPN', 'vpn_keys')],
@@ -772,7 +798,7 @@ export class BotService {
     const tgUser = ctx.from!;
     const dbUser = await this.userService.findByTelegramId(tgUser.id);
     if (!dbUser) {
-      await ctx.reply('❌ Пользователь не найден.');
+      await this.replyOrEdit(ctx, '❌ Пользователь не найден.');
       return;
     }
 
@@ -781,7 +807,7 @@ export class BotService {
     const activeKeys = keys.filter((k) => k.subscriptionExpiresAt && new Date(k.subscriptionExpiresAt) > now);
 
     if (activeKeys.length === 0) {
-      await ctx.reply('❌ Нет активных ключей.', {
+      await this.replyOrEdit(ctx, '❌ Нет активных ключей.', {
         ...Markup.inlineKeyboard([[Markup.button.callback('🔙 Назад', 'my_subscription')]]),
       });
       return;
@@ -797,7 +823,7 @@ export class BotService {
 
     buttons.push([Markup.button.callback('🔙 Назад', 'my_subscription')]);
 
-    await ctx.reply('🔐 **Конфигурации VPN**\n\nВыберите ключ:', {
+    await this.replyOrEdit(ctx, '🔐 **Конфигурации VPN**\n\nВыберите ключ:', {
       parse_mode: 'Markdown',
       ...Markup.inlineKeyboard(buttons),
     });
@@ -807,7 +833,7 @@ export class BotService {
   async showKeyActions(ctx: Context, keyId: number) {
     const key = await this.vpnKeyService.findById(keyId);
     if (!key) {
-      await ctx.reply('❌ Ключ не найден.');
+      await this.replyOrEdit(ctx, '❌ Ключ не найден.');
       return;
     }
 
@@ -816,7 +842,7 @@ export class BotService {
       `📅 До: **${this.formatMskDate(key.subscriptionExpiresAt!)}**\n\n` +
       `Выберите действие:`;
 
-    await ctx.reply(message, {
+    await this.replyOrEdit(ctx, message, {
       parse_mode: 'Markdown',
       ...Markup.inlineKeyboard([
         [Markup.button.callback('📥 Скачать конфигурацию', `getlink_${key.id}`)],
@@ -845,7 +871,7 @@ export class BotService {
       );
     }
 
-    await ctx.reply(
+    await this.replyOrEdit(ctx, 
       '💳 **Завершение пополнения**\n\nВыберите валюту пополнения:',
       {
         parse_mode: 'Markdown',
@@ -859,7 +885,7 @@ export class BotService {
 
   /** Prompt user to enter TxID (amount will be fetched from blockchain later) */
   async showTxIdPrompt(ctx: Context, currency: string) {
-    await ctx.reply(
+    await this.replyOrEdit(ctx, 
       `📝 Введите **TxID** транзакции:\n\n` +
       `Пример: \`abc123def456...\`\n\n` +
       `Валюта: **${currency}**\n` +
@@ -919,7 +945,7 @@ export class BotService {
   /** Show deposit history to user */
   async showMyDeposits(ctx: Context, deposits: Deposit[]) {
     if (deposits.length === 0) {
-      await ctx.reply('📭 У вас пока нет пополнений.');
+      await this.replyOrEdit(ctx, '📭 У вас пока нет пополнений.');
       return;
     }
 
@@ -928,7 +954,7 @@ export class BotService {
       return `${statusIcon} **${d.currency}** ${d.amount} | Tx: \`${d.txId.slice(0, 16)}...\` | ${d.createdAt.toISOString().replace('T', ' ').slice(0, 19)}`;
     });
 
-    await ctx.reply(
+    await this.replyOrEdit(ctx, 
       `📋 **История пополнений**\n\n${lines.join('\n\n')}`,
       { parse_mode: 'Markdown' },
     );
@@ -939,7 +965,7 @@ export class BotService {
     const deposits = await this.depositService.findPending();
 
     if (deposits.length === 0) {
-      await ctx.reply('✅ Нет ожидающих пополнений.');
+      await this.replyOrEdit(ctx, '✅ Нет ожидающих пополнений.');
       return;
     }
 
@@ -953,7 +979,7 @@ export class BotService {
         `🔗 TxID: \`${d.txId}\`\n` +
         `📅 ${d.createdAt.toISOString().replace('T', ' ').slice(0, 19)}`;
 
-      await ctx.reply(message, {
+      await this.replyOrEdit(ctx, message, {
         parse_mode: 'Markdown',
         ...Markup.inlineKeyboard([
           [
@@ -999,13 +1025,13 @@ export class BotService {
     // payload format: "plan_hours" e.g. "168" for 7 days
     const hours = parseInt(payload, 10) || 0;
     if (hours <= 0) {
-      await ctx.reply('🎉 Спасибо за оплату! Подписка активирована.');
+      await this.replyOrEdit(ctx, '🎉 Спасибо за оплату! Подписка активирована.');
       return;
     }
 
     const dbUser = await this.userService.findByTelegramId(userId);
     if (!dbUser) {
-      await ctx.reply('🎉 Спасибо за оплату! Но ваш профиль не найден.');
+      await this.replyOrEdit(ctx, '🎉 Спасибо за оплату! Но ваш профиль не найден.');
       return;
     }
 
@@ -1027,14 +1053,14 @@ export class BotService {
     ]);
 
     if (provisioned) {
-      await ctx.reply(
+      await this.replyOrEdit(ctx, 
         `🎉 Спасибо за оплату!\n\n` +
         `✅ Подписка активирована до **${expiryStr}**\n` +
         `🔐 VPN-аккаунт создан:`,
         { parse_mode: 'Markdown', ...vpnButton },
       );
     } else {
-      await ctx.reply(
+      await this.replyOrEdit(ctx, 
         `🎉 Спасибо за оплату!\n\n` +
         `✅ Подписка активирована до **${expiryStr}**\n` +
         `⚠️ Не удалось создать VPN-аккаунт. Администратор решит проблему.`,

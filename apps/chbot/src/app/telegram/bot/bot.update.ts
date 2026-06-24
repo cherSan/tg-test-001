@@ -342,32 +342,7 @@ export class BotUpdate {
     const tgUser = ctx.from!;
     const dbUser = await this.userService.findByTelegramId(tgUser.id);
     if (!dbUser) return;
-
-    const keys = await this.botService.getUserKeys(dbUser.id);
-    const activeKeys = keys.filter((k) => k.subscriptionExpiresAt && new Date(k.subscriptionExpiresAt) > new Date());
-    const balance = (dbUser.userBalanceUSDT ?? 0).toFixed(2);
-
-    if (activeKeys.length > 0) {
-      // Has active keys → show subscription page
-      await this.botService.showMySubscription(ctx, dbUser);
-    } else {
-      // No active keys → show info + action buttons
-      const message =
-        `Уважаемый пользователь, у Вас сейчас нет действующих ключей, но Вы можете их оформить.\n\n` +
-        `💰 Ваш баланс: **${balance}** USDT\n\n` +
-        `Если Вы считаете, что это ошибка, для связи с поддержкой используйте Ваш ID: \`${tgUser.id}\``;
-
-      await ctx.reply(message, {
-        parse_mode: 'Markdown',
-        ...Markup.inlineKeyboard([
-          [Markup.button.callback('🔌 Оформить подписку', 'buy')],
-          [Markup.button.callback('💳 Пополнить баланс', 'top_up')],
-          [Markup.button.callback('🎁 Подарить подписку', 'gift_sub')],
-          [Markup.button.callback('👥 Пригласить друга', 'invite_friend')],
-          [Markup.button.callback('🛟 Техподдержка', 'create_ticket')],
-        ]),
-      });
-    }
+    await this.botService.showMySubscription(ctx, dbUser);
   }
 
   @Action('invite_friend')

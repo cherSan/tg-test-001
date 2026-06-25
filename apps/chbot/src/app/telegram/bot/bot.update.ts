@@ -221,6 +221,11 @@ export class BotUpdate {
 
   // ─── Show menu callback (back button) ──────────────────────
 
+  @Action('noop')
+  async onNoop(@Ctx() ctx: Context) {
+    await ctx.answerCbQuery();
+  }
+
   @Action('show_menu')
   async onShowMenu(@Ctx() ctx: Context) {
     if (!this.checkActionSpam(ctx)) { await ctx.answerCbQuery().catch(() => {}); return; }
@@ -724,7 +729,10 @@ export class BotUpdate {
 
   /** Shared admin tickets list (no answerCbQuery) */
   private async showAdminTickets(ctx: Context) {
-    if (!this.checkAdmin(ctx) && !this.checkSupport(ctx)) return;
+    if (!this.checkAdmin(ctx)) {
+      const ok = await this.checkSupport(ctx);
+      if (!ok) return;
+    }
 
     const tickets = await this.ticketService.findOpen();
     if (tickets.length === 0) {
@@ -749,7 +757,7 @@ export class BotUpdate {
   async onViewTicket(@Ctx() ctx: Context & { session: SessionData }) {
     if (!this.checkActionSpam(ctx)) { await ctx.answerCbQuery().catch(() => {}); return; }
     await ctx.answerCbQuery();
-    if (!this.checkAdmin(ctx) && !this.checkSupport(ctx)) return;
+    if (!this.checkAdmin(ctx) && !(await this.checkSupport(ctx))) return;
 
     const match = (ctx as any).match;
     const ticketId = parseInt(match[1], 10);
@@ -761,7 +769,7 @@ export class BotUpdate {
   async onReplyTicket(@Ctx() ctx: Context & { session: SessionData }) {
     if (!this.checkActionSpam(ctx)) { await ctx.answerCbQuery().catch(() => {}); return; }
     await ctx.answerCbQuery();
-    if (!this.checkAdmin(ctx) && !this.checkSupport(ctx)) return;
+    if (!this.checkAdmin(ctx) && !(await this.checkSupport(ctx))) return;
 
     const match = (ctx as any).match;
     const ticketId = parseInt(match[1], 10);
@@ -782,7 +790,7 @@ export class BotUpdate {
   async onCloseTicket(@Ctx() ctx: Context & { session: SessionData }) {
     if (!this.checkActionSpam(ctx)) { await ctx.answerCbQuery().catch(() => {}); return; }
     await ctx.answerCbQuery();
-    if (!this.checkAdmin(ctx) && !this.checkSupport(ctx)) return;
+    if (!this.checkAdmin(ctx) && !(await this.checkSupport(ctx))) return;
 
     const match = (ctx as any).match;
     const ticketId = parseInt(match[1], 10);
@@ -844,11 +852,13 @@ export class BotUpdate {
   }
 
   /** Check if user is support staff */
-  private checkSupport(ctx: Context): boolean {
+  private async checkSupport(ctx: Context): Promise<boolean> {
     const tgUser = ctx.from;
     if (!tgUser) return false;
     const ids = this.botService.getSupportIds();
-    return ids.includes(tgUser.id);
+    if (ids.includes(tgUser.id)) return true;
+    const dbUser = await this.userService.findByTelegramId(tgUser.id);
+    return dbUser?.role === 'support';
   }
 
   /** Show referral program info with stats */
@@ -1021,6 +1031,19 @@ export class BotUpdate {
     await this.showReferralInfo(ctx);
   }
 
+  @Hears('⚙️ Админ')
+  async onKeyboardAdmin(@Ctx() ctx: Context) {
+    if (!(await this.checkActive(ctx))) return;
+    if (!this.checkAdmin(ctx)) return;
+    await this.botService.showMenu(ctx);
+  }
+
+  @Hears('🛟 Тикеты')
+  async onKeyboardSupportTickets(@Ctx() ctx: Context) {
+    if (!(await this.checkActive(ctx))) return;
+    await this.botService.showAdminTickets(ctx);
+  }
+
   @Hears('ℹ️ Информация')
   async onKeyboardInfo(@Ctx() ctx: Context) {
     if (!(await this.checkActive(ctx))) return;
@@ -1116,6 +1139,34 @@ export class BotUpdate {
       return;
     }
     await this.botService.showMySubscription(ctx, dbUser);
+  }
+
+  @Action(/^seeusers_p(\d+)$/)
+  async onSeeUsersPage(@Ctx() ctx: Context) {
+    if (!this.checkActionSpam(ctx)) { await ctx.answerCbQuery().catch(() => {}); return; }
+    await ctx.answerCbQuery();
+    if (!this.checkAdmin(ctx)) return;
+    const match = (ctx as any).match;
+    await this.botService.showEditUsersList(ctx, parseInt(match[1], 10));
+  }
+
+  @Action('search_users')
+  async onSearchUsers(@Ctx() ctx: Context & { session: SessionData }) {
+    if (!this.checkActionSpam(ctx)) { await ctx.answerCbQuery().catch(() => {}); return; }
+    await ctx.answerCbQuery();
+    if (!this.checkAdmin(ctx)) return;
+    ctx.session.awaitingEditField = { userId: 0, field: 'user_search' as any };
+    await this.botService.showSearchUsers(ctx);
+  }
+
+  @Action('jumppage')
+  async onJumpPage(@Ctx() ctx: Context & { session: SessionData }) {
+    if (!this.checkActionSpam(ctx)) { await ctx.answerCbQuery().catch(() => {}); return; }
+    await ctx.answerCbQuery();
+    ctx.session.awaitingEditField = { userId: 0, field: 'jump_page' as any };
+    await ctx.reply('📋 Введите номер страницы:', {
+      ...Markup.inlineKeyboard([[Markup.button.callback('🔙 Отмена', 'seeusers_p1')]]),
+    });
   }
 
   @Action('buy')
@@ -1395,6 +1446,7 @@ export class BotUpdate {
 
     // Delete from HideFox VPN
     await this.botService.deleteKey(key);
+    if (dbUser) await this.botService.notifyUser(ctx, dbUser.telegramId, `🗑 Администратор **${ctx.from!.first_name || 'Администратор'}** удалил Ваш ключ **Key${key.keyIndex}**.`);
     await ctx.reply(`🗑 Ключ **Key${key.keyIndex}** удалён.`, { parse_mode: 'Markdown' });
 
     // Show updated subscription page
@@ -1524,7 +1576,7 @@ export class BotUpdate {
     const field = match[1];
     const userId = parseInt(match[2], 10);
 
-    const validFields = ['firstName', 'username', 'userBalanceUSDT', 'userBalanceBTC', 'userBalanceGram', 'subscriptionExpiresAt'];
+    const validFields = ['firstName', 'username', 'userBalanceUSDT', 'subscriptionExpiresAt'];
     if (!validFields.includes(field)) {
       await ctx.reply('❌ Неизвестное поле для редактирования.');
       return;
@@ -1534,8 +1586,6 @@ export class BotUpdate {
       firstName: 'Имя',
       username: 'Username',
       userBalanceUSDT: 'баланс USDT',
-      userBalanceBTC: 'баланс BTC',
-      userBalanceGram: 'баланс GRAM',
       subscriptionExpiresAt: 'дата окончания подписки',
     };
 
@@ -1545,10 +1595,42 @@ export class BotUpdate {
 
     ctx.session.awaitingEditField = { userId, field };
     await ctx.reply(
-      `✏️ Введите новое значение для поля **${fieldLabels[field] || field}**:${hint}\n` +
-      `(отправьте /cancel для отмены)`,
-      { parse_mode: 'Markdown' },
+      `✏️ Введите новое значение для поля **${fieldLabels[field] || field}**:${hint}`,
+      {
+        parse_mode: 'Markdown',
+        ...Markup.inlineKeyboard([
+          [Markup.button.callback('❌ Отменить', 'cancel_action')],
+        ]),
+      },
     );
+  }
+
+  @Action(/^er_support_(\d+)$/)
+  async onSetSupport(@Ctx() ctx: Context) {
+    if (!this.checkActionSpam(ctx)) { await ctx.answerCbQuery().catch(() => {}); return; }
+    await ctx.answerCbQuery();
+    if (!this.checkAdmin(ctx)) return;
+    const match = (ctx as any).match;
+    const userId = parseInt(match[1], 10);
+    await this.userService.update(userId, { role: 'support' });
+    const u = await this.userService.findById(userId);
+    if (u) await this.botService.notifyUser(ctx, u.telegramId, `🛟 Администратор **${ctx.from!.first_name || 'Администратор'}** назначил Вас **Саппортом**.`);
+    await ctx.reply('✅ Роль изменена на **support**.', { parse_mode: 'Markdown' });
+    await this.botService.showUserEditFields(ctx, (await this.userService.findById(userId))!);
+  }
+
+  @Action(/^er_support_(\d+)$/)
+  async onSetSupport(@Ctx() ctx: Context) {
+    if (!this.checkActionSpam(ctx)) { await ctx.answerCbQuery().catch(() => {}); return; }
+    await ctx.answerCbQuery();
+    if (!this.checkAdmin(ctx)) return;
+    const match = (ctx as any).match;
+    const userId = parseInt(match[1], 10);
+    await this.userService.update(userId, { role: 'support' });
+    const u = await this.userService.findById(userId);
+    if (u) await this.botService.notifyUser(ctx, u.telegramId, `🛟 Администратор **${ctx.from!.first_name || 'Администратор'}** назначил Вас **Саппортом**.`);
+    await ctx.reply('✅ Роль изменена на **support**.', { parse_mode: 'Markdown' });
+    await this.botService.showUserEditFields(ctx, (await this.userService.findById(userId))!);
   }
 
   @Action(/^er_(admin|user)_(\d+)$/)
@@ -1568,6 +1650,8 @@ export class BotUpdate {
     }
 
     await this.userService.update(userId, { role: newRole });
+    const rl = newRole === 'admin' ? 'Администратором' : 'Пользователем';
+    await this.botService.notifyUser(ctx, user.telegramId, `👑 Администратор **${ctx.from!.first_name || 'Администратор'}** назначил Вас **${rl}**.`);
     await ctx.reply(`✅ Роль изменена на **${newRole}**.`, { parse_mode: 'Markdown' });
     await this.botService.showUserEditFields(ctx, (await this.userService.findById(userId))!);
   }
@@ -1618,6 +1702,7 @@ export class BotUpdate {
     // Create a new 7-day key
     const result = await this.botService.provisionKey(user, 168);
     if (result) {
+      await this.botService.notifyUser(ctx, user.telegramId, `📅 Администратор **${ctx.from!.first_name || 'Администратор'}** создал Вам новый ключ **Key${result.key.keyIndex}** до ${this.botService.formatMskDate(result.key.subscriptionExpiresAt!)}`);
       await ctx.reply(
         `📅 Ключ **Key${result.key.keyIndex}** создан до **${this.botService.formatMskDate(result.key.subscriptionExpiresAt!)}**`,
         { parse_mode: 'Markdown' },
@@ -1668,6 +1753,7 @@ export class BotUpdate {
 
     if (ok) {
       const label = action === 'enable' ? 'включён' : 'отключён';
+      await this.botService.notifyUser(ctx, user.telegramId, `🔐 Администратор **${ctx.from!.first_name || 'Администратор'}** ${label} Ваш VPN-ключ.`);
       await ctx.answerCbQuery(`✅ Клиент ${label}`);
     } else {
       await ctx.answerCbQuery('❌ Не удалось изменить состояние клиента');
@@ -1906,7 +1992,7 @@ export class BotUpdate {
       }
 
       // ── Skip keyboard button texts (handled by @Hears) ─────
-      const keyboardButtons = ['🔌 Подключить VPN', '👤 Профиль', '🎁 Реферальная программа', 'ℹ️ Информация'];
+      const keyboardButtons = ['🔌 Подключить VPN', '👤 Профиль', '🎁 Реферальная программа', 'ℹ️ Информация', '⚙️ Админ', '🛟 Тикеты'];
       if (keyboardButtons.includes(text)) {
         return;
       }
@@ -1930,7 +2016,8 @@ export class BotUpdate {
   async onSeeUsersAction(@Ctx() ctx: Context) {
     if (!this.checkActionSpam(ctx)) { await ctx.answerCbQuery().catch(() => {}); return; }
     await ctx.answerCbQuery();
-    await this.handleSeeUsers(ctx);
+    if (!this.checkAdmin(ctx)) return;
+    await this.botService.showEditUsersList(ctx, 1);
   }
 
   // ─── Private helpers ─────────────────────────────────────────
@@ -2142,6 +2229,34 @@ export class BotUpdate {
     }
 
     // ── Subscription date: redirect to key management ──
+    // ── Search/jump ──────────────────────────────────────
+    if (field === 'user_search') {
+      ctx.session.awaitingEditField = undefined;
+      await this.botService.showEditUsersList(ctx, 1, text.trim());
+      return;
+    }
+    if (field === 'jump_page') {
+      const page = parseInt(text.trim(), 10);
+      ctx.session.awaitingEditField = undefined;
+      if (isNaN(page) || page < 1) { await ctx.reply('❌ Введите положительное число.'); return; }
+      await this.botService.showEditUsersList(ctx, page);
+      return;
+    }
+
+    // ── Search/jump ──────────────────────────────────────
+    if (field === 'user_search') {
+      ctx.session.awaitingEditField = undefined;
+      await this.botService.showEditUsersList(ctx, 1, text.trim());
+      return;
+    }
+    if (field === 'jump_page') {
+      const page = parseInt(text.trim(), 10);
+      ctx.session.awaitingEditField = undefined;
+      if (isNaN(page) || page < 1) { await ctx.reply('❌ Введите положительное число.'); return; }
+      await this.botService.showEditUsersList(ctx, page);
+      return;
+    }
+
     // ── Set referrer code ────────────────────────────────
     if (field === 'referrer_code') {
       const code = text.trim().toUpperCase();
@@ -2173,13 +2288,16 @@ export class BotUpdate {
 
     let value: string | number = text.trim();
 
-    if (field === 'userBalanceUSDT' || field === 'userBalanceBTC' || field === 'userBalanceGram') {
-      const num = parseFloat(value);
-      if (isNaN(num) || num < 0) {
-        await ctx.reply('❌ Введите положительное число.');
-        return;
-      }
-      value = num;
+    if (field === 'userBalanceUSDT') {
+      const newVal = parseFloat(value);
+      if (isNaN(newVal) || newVal < 0) { await ctx.reply('❌ Введите положительное число.'); return; }
+      const oldVal = (user.userBalanceUSDT ?? 0).toFixed(2);
+      await this.userService.update(userId, { userBalanceUSDT: newVal });
+      await this.botService.notifyUser(ctx, user.telegramId, `💰 Ваш баланс изменён администратором **${ctx.from!.first_name || 'Администратор'}**.\nБыло: ${oldVal} USDT → Стало: ${newVal.toFixed(2)} USDT`);
+      ctx.session.awaitingEditField = undefined;
+      await ctx.reply(`✅ Баланс обновлён: ${oldVal} → ${newVal.toFixed(2)} USDT`);
+      await this.botService.showUserEditFields(ctx, (await this.userService.findById(userId))!);
+      return;
     }
 
     await this.userService.update(userId, { [field]: value } as any);

@@ -132,6 +132,11 @@ export class BotService {
     return raw.split(',').map((id) => parseInt(id.trim(), 10)).filter((id) => !isNaN(id));
   }
 
+  async notifyUser(ctx: Context, telegramId: number, message: string, extra?: any) {
+    if (process.env.SILENT_ADMIN_MODE === 'true') return;
+    try { await ctx.telegram.sendMessage(telegramId, message, extra || { parse_mode: 'Markdown' }); } catch (_) {}
+  }
+
   /** Reply or edit: if called from a callback query, edit the original message; otherwise send new */
   private async replyOrEdit(
     ctx: Context,
@@ -168,50 +173,45 @@ export class BotService {
     const tgUser = ctx.from;
     const isAdmin = tgUser ? this.userService.isAdmin(tgUser.id) : false;
 
-    // Check subscription for feature gating
-    const dbUser = tgUser ? await this.userService.findByTelegramId(tgUser.id) : null;
-    const hasSub = dbUser ? await this.hasActiveSubscription(dbUser) : false;
-
-    const buttons: any[][] = [
-      [
-        Markup.button.url('Читать правила', 'https://telegram.org'),
-      ],
-      [
-        Markup.button.callback('💰 Баланс', 'balance'),
-        Markup.button.callback('💳 Пополнить баланс', 'top_up'),
-      ],
-      // [
-      //   Markup.button.callback('📋 Мои подписки', 'my_subscription'),
-      // ],
-    ];
-
-    buttons.push([
-      // // Markup.button.callback('Тест визарда', 'wizard_test'),
-      // // Markup.button.callback('Тест сцены', 'scene_test'),
-    ]);
-
     if (isAdmin) {
-      buttons.push([Markup.button.callback('👥 Пользователи', 'seeusers')]);
-      buttons.push([Markup.button.callback('⏳ Ожидают активации', 'pending_users')]);
-      buttons.push([Markup.button.callback('💳 Ожидают пополнения', 'pending_deposits')]);
-      buttons.push([Markup.button.callback('📝 Редактировать пользователей', 'edit_users')]);
-      buttons.push([Markup.button.callback('🛟 Тикеты', 'admin_tickets')]);
-      buttons.push([Markup.button.callback('⚙️ Настройки', 'admin_settings')]);
+      // Admin-only clean menu
+      const buttons: any[][] = [
+        [Markup.button.callback('👥 Пользователи', 'seeusers_p1')],
+        [Markup.button.callback('⏳ Ожидают активации', 'pending_users')],
+        [Markup.button.callback('💳 Ожидают пополнения', 'pending_deposits')],
+        [Markup.button.callback('🛟 Тикеты', 'admin_tickets')],
+        [Markup.button.callback('⚙️ Настройки', 'admin_settings')],
+      ];
+      await this.replyOrEdit(ctx, '⚙️ Админ-панель:', Markup.inlineKeyboard(buttons));
+    } else {
+      // Regular user menu
+      const buttons: any[][] = [
+        [Markup.button.url('Читать правила', 'https://telegram.org')],
+        [Markup.button.callback('💰 Баланс', 'balance'), Markup.button.callback('💳 Пополнить баланс', 'top_up')],
+        [Markup.button.callback('Show menu', 'show_menu')],
+      ];
+      await this.replyOrEdit(ctx, 'Main menu:', Markup.inlineKeyboard(buttons));
     }
-
-    buttons.push([Markup.button.callback('Show menu', 'show_menu')]);
-
-    await this.replyOrEdit(ctx, 'Main menu:', Markup.inlineKeyboard(buttons));
   }
 
   async botMenu(ctx: Context) {
-    await this.replyOrEdit(ctx, 
+    const tgUser = ctx.from;
+    const isAdmin = tgUser ? this.userService.isAdmin(tgUser.id) : false;
+
+    const keyboard: any[][] = [
+      ['🔌 Подключить VPN'],
+      ['👤 Профиль', '🎁 Реферальная программа'],
+      ['ℹ️ Информация'],
+    ];
+    if (isAdmin) {
+      keyboard.push(['⚙️ Админ']);
+    } else if (tgUser && this.userService.isAdminOrSupport(tgUser.id)) {
+      keyboard.push(['🛟 Тикеты']);
+    }
+
+    await this.replyOrEdit(ctx,
       '🦊',
-      Markup.keyboard([
-        ['🔌 Подключить VPN'],
-        ['👤 Профиль', '🎁 Реферальная программа'],
-        ['ℹ️ Информация'],
-      ]).resize().persistent(),
+      Markup.keyboard(keyboard).resize().persistent(),
     );
   }
 
@@ -303,6 +303,7 @@ export class BotService {
           ? Markup.button.callback('🔴 Выключить автоактивацию', 'autoact_off')
           : Markup.button.callback('🟢 Включить автоактивацию', 'autoact_on'),
       ],
+      [Markup.button.callback('🔙 Назад', 'show_menu')],
     ];
 
     await this.replyOrEdit(ctx, info, {
@@ -312,15 +313,31 @@ export class BotService {
   }
 
   /** Show list of users for editing (admin only) */
-  async showEditUsersList(ctx: Context) {
-    const users = await this.userService.findAll();
+  async showEditUsersList(ctx: Context, page: number = 1, search?: string) {
+    let users = await this.userService.findAll();
+    if (search) {
+      const q = search.toLowerCase();
+      users = users.filter((u) =>
+        String(u.telegramId).includes(q) ||
+        (u.firstName || '').toLowerCase().includes(q) ||
+        (u.username || '').toLowerCase().includes(q)
+      );
+    }
+    const totalPages = Math.max(1, Math.ceil(users.length / 10));
+    const p = Math.max(1, Math.min(page, totalPages));
+    const pageUsers = users.slice((p - 1) * 10, p * 10);
 
     if (users.length === 0) {
-      await this.replyOrEdit(ctx, '📭 В базе пока нет пользователей.');
+      await this.replyOrEdit(ctx, '📭 Пользователи не найдены.', {
+        ...Markup.inlineKeyboard([
+          [Markup.button.callback('🔍 Поиск', 'search_users')],
+          [Markup.button.callback('🔙 Назад', 'show_menu')],
+        ]),
+      });
       return;
     }
 
-    const buttons: any[][] = users.map((u) => {
+    const buttons: any[][] = pageUsers.map((u) => {
       const roleIcon = u.role === 'admin' ? '👑' : '👤';
       const blockedIcon = u.userIsBlocked ? '🚫' : '';
       const name = u.firstName || u.username || `ID ${u.telegramId}`;
@@ -328,13 +345,30 @@ export class BotService {
       return [Markup.button.callback(label, `edit_user_${u.telegramId}`)];
     });
 
-    buttons.push([Markup.button.callback('🔙 Назад', 'seeusers')]);
+    const navRow: any[] = [];
+    if (p > 1) navRow.push(Markup.button.callback('◀', `seeusers_p${p - 1}`));
+    navRow.push(Markup.button.callback(`${p}/${totalPages}`, 'noop'));
+    if (p < totalPages) navRow.push(Markup.button.callback('▶', `seeusers_p${p + 1}`));
+    buttons.push(navRow);
 
-    const message = `📝 **Выберите пользователя для редактирования** (${users.length}):`;
-    await this.replyOrEdit(ctx, message, {
-      parse_mode: 'Markdown',
-      ...Markup.inlineKeyboard(buttons),
-    });
+    buttons.push([Markup.button.callback('📋 Перейти на страницу', 'jumppage')]);
+    buttons.push([Markup.button.callback('🔍 Поиск', 'search_users')]);
+    if (search) {
+      buttons.push([Markup.button.callback('❌ Сбросить поиск', 'seeusers_p1')]);
+    }
+    buttons.push([Markup.button.callback('🔙 Назад', 'show_menu')]);
+
+    const info = search
+      ? `🔍 Поиск: "${search}" — найдено ${users.length}`
+      : `📝 Пользователи (стр. ${p}/${totalPages}, всего ${users.length}):`;
+    await this.replyOrEdit(ctx, info, { parse_mode: 'Markdown', ...Markup.inlineKeyboard(buttons) });
+  }
+
+  async showSearchUsers(ctx: Context) {
+    await this.replyOrEdit(ctx,
+      '🔍 Введите часть ID или имени для поиска:',
+      { parse_mode: 'Markdown', ...Markup.inlineKeyboard([[Markup.button.callback('🔙 Назад', 'seeusers_p1')]]) },
+    );
   }
 
   /** Show user's balance (USDT only — all deposits auto-converted) */
@@ -798,7 +832,7 @@ export class BotService {
       `${roleIcon} **${name}** (${username})\n` +
       `🆔 Telegram ID: \`${user.telegramId}\`\n` +
       `💼 Роль: ${user.role}\n` +
-      `💰 Баланс: ${user.userBalanceUSDT} USDT / ${user.userBalanceBTC} BTC / ${user.userBalanceGram} GRAM\n` +
+      `💰 Баланс: ${(user.userBalanceUSDT ?? 0).toFixed(2)} USDT\n` +
       `📌 Статус: ${activeStatus}\n` +
       `🔑 Ключей: **${keyCount}**\n` +
       (blockedStatus ? `🚫 ${blockedStatus}\n` : '') +
@@ -812,17 +846,16 @@ export class BotService {
       ],
       [
         Markup.button.callback('💵 USDT', `ef_userBalanceUSDT_${user.id}`),
-        Markup.button.callback('₿ BTC', `ef_userBalanceBTC_${user.id}`),
-        Markup.button.callback('💎 GRAM', `ef_userBalanceGram_${user.id}`),
       ],
       [
         Markup.button.callback('⚙️ Управление подпиской', `submgmt_${user.id}`),
       ],
-      [
-        user.role === 'admin'
-          ? Markup.button.callback('👤 Сделать User', `er_user_${user.id}`)
-          : Markup.button.callback('👑 Сделать Admin', `er_admin_${user.id}`),
-      ],
+      (user.role === 'admin'
+        ? [Markup.button.callback('👤 Сделать User', `er_user_${user.id}`), Markup.button.callback('🛟 Сделать Саппортом', `er_support_${user.id}`)]
+        : user.role === 'support'
+        ? [Markup.button.callback('👑 Сделать Admin', `er_admin_${user.id}`), Markup.button.callback('👤 Сделать User', `er_user_${user.id}`)]
+        : [Markup.button.callback('👑 Сделать Admin', `er_admin_${user.id}`), Markup.button.callback('🛟 Сделать Саппортом', `er_support_${user.id}`)]
+      ),
       [
         user.userIsActive
           ? Markup.button.callback('🚫 Деактивировать', `ea_false_${user.id}`)

@@ -5,11 +5,13 @@ import { Deposit } from './entities/deposit.entity';
 import { VpnKey } from './entities/vpn-key.entity';
 import { Ticket } from './entities/ticket.entity';
 import { ReferralEarning } from './entities/referral-earning.entity';
+import { GiftCode } from './entities/gift-code.entity';
 import { UserService } from './user.service';
 import { DepositService } from './deposit.service';
 import { VpnKeyService } from './vpn-key.service';
 import { TicketService } from './ticket.service';
 import { ReferralService } from './referral.service';
+import { GiftService } from './gift.service';
 
 @Module({
   imports: [
@@ -22,9 +24,9 @@ import { ReferralService } from './referral.service';
         synchronize: true, // TODO: disable in production
       }),
     }),
-    TypeOrmModule.forFeature([User, Deposit, VpnKey, Ticket, ReferralEarning]),
+    TypeOrmModule.forFeature([User, Deposit, VpnKey, Ticket, ReferralEarning, GiftCode]),
   ],
-  providers: [UserService, DepositService, VpnKeyService, TicketService, ReferralService],
-  exports: [TypeOrmModule, UserService, DepositService, VpnKeyService, TicketService, ReferralService],
+  providers: [UserService, DepositService, VpnKeyService, TicketService, ReferralService, GiftService],
+  exports: [TypeOrmModule, UserService, DepositService, VpnKeyService, TicketService, ReferralService, GiftService],
 })
 export class DBModule {}

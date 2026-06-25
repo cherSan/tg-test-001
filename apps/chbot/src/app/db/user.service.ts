@@ -35,6 +35,10 @@ export class UserService {
     return adminIds.includes(telegramId);
   }
 
+  isAdminOrSupport(telegramId: number): boolean {
+    return this.isAdmin(telegramId);
+  }
+
   /** Get admin Telegram IDs from env */
   private getAdminIds(): number[] {
     const raw = process.env.ADMIN_IDS || '';
@@ -107,8 +111,8 @@ export class UserService {
   async findAll(): Promise<User[]> {
     return this.userRepo
       .createQueryBuilder('user')
-      .orderBy("CASE WHEN user.role = 'admin' THEN 0 ELSE 1 END")
-      .addOrderBy('user.createdAt', 'DESC')
+      .orderBy("CASE WHEN user.role = 'admin' THEN 0 WHEN user.role = 'support' THEN 1 ELSE 2 END")
+      .addOrderBy('user.firstName', 'ASC')
       .getMany();
   }
 

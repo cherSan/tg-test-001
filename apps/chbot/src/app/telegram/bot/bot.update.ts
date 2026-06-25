@@ -195,7 +195,7 @@ export class BotUpdate {
   async onAdminSettings(@Ctx() ctx: Context) {
     if (!this.checkActionSpam(ctx)) { await ctx.answerCbQuery().catch(() => {}); return; }
     await ctx.answerCbQuery();
-    if (!this.checkAdmin(ctx)) return;
+    if (!(await this.checkAdmin(ctx))) return;
     await this.botService.showAdminSettings(ctx);
   }
 
@@ -203,7 +203,7 @@ export class BotUpdate {
   async onAutoActOn(@Ctx() ctx: Context) {
     if (!this.checkActionSpam(ctx)) { await ctx.answerCbQuery().catch(() => {}); return; }
     await ctx.answerCbQuery();
-    if (!this.checkAdmin(ctx)) return;
+    if (!(await this.checkAdmin(ctx))) return;
     this.botService.autoActivate = true;
     await ctx.reply('🟢 Автоактивация **включена**.', { parse_mode: 'Markdown' });
     await this.botService.showAdminSettings(ctx);
@@ -213,7 +213,7 @@ export class BotUpdate {
   async onAutoActOff(@Ctx() ctx: Context) {
     if (!this.checkActionSpam(ctx)) { await ctx.answerCbQuery().catch(() => {}); return; }
     await ctx.answerCbQuery();
-    if (!this.checkAdmin(ctx)) return;
+    if (!(await this.checkAdmin(ctx))) return;
     this.botService.autoActivate = false;
     await ctx.reply('🔴 Автоактивация **выключена**.', { parse_mode: 'Markdown' });
     await this.botService.showAdminSettings(ctx);
@@ -240,7 +240,7 @@ export class BotUpdate {
   async onBlockUser(@Ctx() ctx: Context) {
     if (!this.checkActionSpam(ctx)) { await ctx.answerCbQuery().catch(() => {}); return; }
     await ctx.answerCbQuery();
-    if (!this.checkAdmin(ctx)) return;
+    if (!(await this.checkAdmin(ctx))) return;
 
     const match = (ctx as any).match;
     const telegramId = parseInt(match[1], 10);
@@ -285,7 +285,7 @@ export class BotUpdate {
   async onUnblockUser(@Ctx() ctx: Context) {
     if (!this.checkActionSpam(ctx)) { await ctx.answerCbQuery().catch(() => {}); return; }
     await ctx.answerCbQuery();
-    if (!this.checkAdmin(ctx)) return;
+    if (!(await this.checkAdmin(ctx))) return;
 
     const match = (ctx as any).match;
     const telegramId = parseInt(match[1], 10);
@@ -307,7 +307,7 @@ export class BotUpdate {
   async onDeleteFromNotify(@Ctx() ctx: Context) {
     if (!this.checkActionSpam(ctx)) { await ctx.answerCbQuery().catch(() => {}); return; }
     await ctx.answerCbQuery();
-    if (!this.checkAdmin(ctx)) return;
+    if (!(await this.checkAdmin(ctx))) return;
 
     const match = (ctx as any).match;
     const telegramId = parseInt(match[1], 10);
@@ -1047,7 +1047,7 @@ export class BotUpdate {
   @Hears('⚙️ Админ')
   async onKeyboardAdmin(@Ctx() ctx: Context) {
     if (!(await this.checkActive(ctx))) return;
-    if (!this.checkAdmin(ctx)) return;
+    if (!(await this.checkAdmin(ctx))) return;
     await this.botService.showMenu(ctx);
   }
 
@@ -1158,7 +1158,7 @@ export class BotUpdate {
   async onSeeUsersPage(@Ctx() ctx: Context) {
     if (!this.checkActionSpam(ctx)) { await ctx.answerCbQuery().catch(() => {}); return; }
     await ctx.answerCbQuery();
-    if (!this.checkAdmin(ctx)) return;
+    if (!(await this.checkAdmin(ctx))) return;
     const match = (ctx as any).match;
     await this.botService.showEditUsersList(ctx, parseInt(match[1], 10));
   }
@@ -1167,7 +1167,7 @@ export class BotUpdate {
   async onSearchUsers(@Ctx() ctx: Context & { session: SessionData }) {
     if (!this.checkActionSpam(ctx)) { await ctx.answerCbQuery().catch(() => {}); return; }
     await ctx.answerCbQuery();
-    if (!this.checkAdmin(ctx)) return;
+    if (!(await this.checkAdmin(ctx))) return;
     ctx.session.awaitingEditField = { userId: 0, field: 'user_search' as any };
     await this.botService.showSearchUsers(ctx);
   }
@@ -1243,7 +1243,7 @@ export class BotUpdate {
   async onPendingDeposits(@Ctx() ctx: Context) {
     if (!this.checkActionSpam(ctx)) { await ctx.answerCbQuery().catch(() => {}); return; }
     await ctx.answerCbQuery();
-    if (!this.checkAdmin(ctx)) return;
+    if (!(await this.checkAdmin(ctx))) return;
     await this.botService.showPendingDeposits(ctx);
   }
 
@@ -1251,7 +1251,7 @@ export class BotUpdate {
   async onConfirmDeposit(@Ctx() ctx: Context) {
     if (!this.checkActionSpam(ctx)) { await ctx.answerCbQuery().catch(() => {}); return; }
     await ctx.answerCbQuery();
-    if (!this.checkAdmin(ctx)) return;
+    if (!(await this.checkAdmin(ctx))) return;
 
     const match = (ctx as any).match;
     const depositId = parseInt(match[1], 10);
@@ -1300,7 +1300,7 @@ export class BotUpdate {
   async onRejectDeposit(@Ctx() ctx: Context) {
     if (!this.checkActionSpam(ctx)) { await ctx.answerCbQuery().catch(() => {}); return; }
     await ctx.answerCbQuery();
-    if (!this.checkAdmin(ctx)) return;
+    if (!(await this.checkAdmin(ctx))) return;
 
     const match = (ctx as any).match;
     const depositId = parseInt(match[1], 10);
@@ -1547,7 +1547,7 @@ export class BotUpdate {
   async onPendingUsers(@Ctx() ctx: Context) {
     if (!this.checkActionSpam(ctx)) { await ctx.answerCbQuery().catch(() => {}); return; }
     await ctx.answerCbQuery();
-    if (!this.checkAdmin(ctx)) return;
+    if (!(await this.checkAdmin(ctx))) return;
     await this.botService.showPendingUsers(ctx);
   }
 
@@ -1557,7 +1557,7 @@ export class BotUpdate {
   async onEditUsers(@Ctx() ctx: Context) {
     if (!this.checkActionSpam(ctx)) { await ctx.answerCbQuery().catch(() => {}); return; }
     await ctx.answerCbQuery();
-    if (!this.checkAdmin(ctx)) return;
+    if (!(await this.checkAdmin(ctx))) return;
     await this.botService.showEditUsersList(ctx);
   }
 
@@ -1565,7 +1565,7 @@ export class BotUpdate {
   async onEditUser(@Ctx() ctx: Context) {
     if (!this.checkActionSpam(ctx)) { await ctx.answerCbQuery().catch(() => {}); return; }
     await ctx.answerCbQuery();
-    if (!this.checkAdmin(ctx)) return;
+    if (!(await this.checkAdmin(ctx))) return;
 
     const match = (ctx as any).match;
     const telegramId = parseInt(match[1], 10);
@@ -1583,7 +1583,7 @@ export class BotUpdate {
   async onEditField(@Ctx() ctx: Context & { session: SessionData }) {
     if (!this.checkActionSpam(ctx)) { await ctx.answerCbQuery().catch(() => {}); return; }
     await ctx.answerCbQuery();
-    if (!this.checkAdmin(ctx)) return;
+    if (!(await this.checkAdmin(ctx))) return;
 
     const match = (ctx as any).match;
     const field = match[1];
@@ -1622,7 +1622,7 @@ export class BotUpdate {
   async onSetSupport(@Ctx() ctx: Context) {
     if (!this.checkActionSpam(ctx)) { await ctx.answerCbQuery().catch(() => {}); return; }
     await ctx.answerCbQuery();
-    if (!this.checkAdmin(ctx)) return;
+    if (!(await this.checkAdmin(ctx))) return;
     const match = (ctx as any).match;
     const userId = parseInt(match[1], 10);
     await this.userService.update(userId, { role: 'support' });
@@ -1636,7 +1636,7 @@ export class BotUpdate {
   async onSetSupport(@Ctx() ctx: Context) {
     if (!this.checkActionSpam(ctx)) { await ctx.answerCbQuery().catch(() => {}); return; }
     await ctx.answerCbQuery();
-    if (!this.checkAdmin(ctx)) return;
+    if (!(await this.checkAdmin(ctx))) return;
     const match = (ctx as any).match;
     const userId = parseInt(match[1], 10);
     await this.userService.update(userId, { role: 'support' });
@@ -1650,7 +1650,7 @@ export class BotUpdate {
   async onSetRole(@Ctx() ctx: Context) {
     if (!this.checkActionSpam(ctx)) { await ctx.answerCbQuery().catch(() => {}); return; }
     await ctx.answerCbQuery();
-    if (!this.checkAdmin(ctx)) return;
+    if (!(await this.checkAdmin(ctx))) return;
 
     const match = (ctx as any).match;
     const newRole = match[1];
@@ -1673,7 +1673,7 @@ export class BotUpdate {
   async onSetActive(@Ctx() ctx: Context) {
     if (!this.checkActionSpam(ctx)) { await ctx.answerCbQuery().catch(() => {}); return; }
     await ctx.answerCbQuery();
-    if (!this.checkAdmin(ctx)) return;
+    if (!(await this.checkAdmin(ctx))) return;
 
     const match = (ctx as any).match;
     const newActive = match[1] === 'true';
@@ -1701,7 +1701,7 @@ export class BotUpdate {
   async onSubAdd(@Ctx() ctx: Context & { session: SessionData }) {
     if (!this.checkActionSpam(ctx)) { await ctx.answerCbQuery().catch(() => {}); return; }
     await ctx.answerCbQuery();
-    if (!this.checkAdmin(ctx)) return;
+    if (!(await this.checkAdmin(ctx))) return;
     const match = (ctx as any).match;
     const userId = parseInt(match[1], 10);
     const user = await this.userService.findById(userId);
@@ -1717,7 +1717,7 @@ export class BotUpdate {
   async onAdminKeyActions(@Ctx() ctx: Context) {
     if (!this.checkActionSpam(ctx)) { await ctx.answerCbQuery().catch(() => {}); return; }
     await ctx.answerCbQuery();
-    if (!this.checkAdmin(ctx)) return;
+    if (!(await this.checkAdmin(ctx))) return;
     const match = (ctx as any).match;
     await this.botService.showAdminKeyActions(ctx, parseInt(match[1], 10));
   }
@@ -1726,7 +1726,7 @@ export class BotUpdate {
   async onAdminExtendInput(@Ctx() ctx: Context & { session: SessionData }) {
     if (!this.checkActionSpam(ctx)) { await ctx.answerCbQuery().catch(() => {}); return; }
     await ctx.answerCbQuery();
-    if (!this.checkAdmin(ctx)) return;
+    if (!(await this.checkAdmin(ctx))) return;
     const match = (ctx as any).match;
     const keyId = parseInt(match[1], 10);
     ctx.session.awaitingEditField = { userId: keyId, field: 'adm_extend_days' as any };
@@ -1740,7 +1740,7 @@ export class BotUpdate {
   async onAdminDeleteKey(@Ctx() ctx: Context) {
     if (!this.checkActionSpam(ctx)) { await ctx.answerCbQuery().catch(() => {}); return; }
     await ctx.answerCbQuery();
-    if (!this.checkAdmin(ctx)) return;
+    if (!(await this.checkAdmin(ctx))) return;
     const match = (ctx as any).match;
     const keyId = parseInt(match[1], 10);
     const key = await this.botService.getVpnKey(keyId);
@@ -1758,7 +1758,7 @@ export class BotUpdate {
   async onAdminDeleteConfirm(@Ctx() ctx: Context) {
     if (!this.checkActionSpam(ctx)) { await ctx.answerCbQuery().catch(() => {}); return; }
     await ctx.answerCbQuery();
-    if (!this.checkAdmin(ctx)) return;
+    if (!(await this.checkAdmin(ctx))) return;
     const match = (ctx as any).match;
     const key = await this.botService.getVpnKey(parseInt(match[1], 10));
     if (!key) { await ctx.reply('❌ Ключ не найден.'); return; }
@@ -1775,7 +1775,7 @@ export class BotUpdate {
   async onSubMgmt(@Ctx() ctx: Context) {
     if (!this.checkActionSpam(ctx)) { await ctx.answerCbQuery().catch(() => {}); return; }
     await ctx.answerCbQuery();
-    if (!this.checkAdmin(ctx)) return;
+    if (!(await this.checkAdmin(ctx))) return;
 
     const match = (ctx as any).match;
     const userId = parseInt(match[1], 10);
@@ -1794,7 +1794,7 @@ export class BotUpdate {
   async onToggleClient(@Ctx() ctx: Context) {
     if (!this.checkActionSpam(ctx)) { await ctx.answerCbQuery().catch(() => {}); return; }
     await ctx.answerCbQuery();
-    if (!this.checkAdmin(ctx)) return;
+    if (!(await this.checkAdmin(ctx))) return;
 
     const match = (ctx as any).match;
     const keyId = parseInt(match[1], 10);
@@ -1842,7 +1842,7 @@ export class BotUpdate {
   async onDeleteUser(@Ctx() ctx: Context) {
     if (!this.checkActionSpam(ctx)) { await ctx.answerCbQuery().catch(() => {}); return; }
     await ctx.answerCbQuery();
-    if (!this.checkAdmin(ctx)) return;
+    if (!(await this.checkAdmin(ctx))) return;
 
     const match = (ctx as any).match;
     const userId = parseInt(match[1], 10);
@@ -1872,7 +1872,7 @@ export class BotUpdate {
   async onDeleteConfirm(@Ctx() ctx: Context) {
     if (!this.checkActionSpam(ctx)) { await ctx.answerCbQuery().catch(() => {}); return; }
     await ctx.answerCbQuery();
-    if (!this.checkAdmin(ctx)) return;
+    if (!(await this.checkAdmin(ctx))) return;
 
     const match = (ctx as any).match;
     const userId = parseInt(match[1], 10);
@@ -1893,7 +1893,7 @@ export class BotUpdate {
   async onDeleteCancel(@Ctx() ctx: Context) {
     if (!this.checkActionSpam(ctx)) { await ctx.answerCbQuery().catch(() => {}); return; }
     await ctx.answerCbQuery();
-    if (!this.checkAdmin(ctx)) return;
+    if (!(await this.checkAdmin(ctx))) return;
 
     const match = (ctx as any).match;
     const userId = parseInt(match[1], 10);
@@ -2082,7 +2082,7 @@ export class BotUpdate {
   async onSeeUsersAction(@Ctx() ctx: Context) {
     if (!this.checkActionSpam(ctx)) { await ctx.answerCbQuery().catch(() => {}); return; }
     await ctx.answerCbQuery();
-    if (!this.checkAdmin(ctx)) return;
+    if (!(await this.checkAdmin(ctx))) return;
     await this.botService.showEditUsersList(ctx, 1);
   }
 
@@ -2499,15 +2499,18 @@ export class BotUpdate {
   }
 
   /** Check if current user is admin — reply error if not */
-  private checkAdmin(ctx: Context): boolean {
+  private async checkAdmin(ctx: Context): Promise<boolean> {
     const tgUser = ctx.from;
     if (!tgUser) {
       ctx.reply('Не удалось определить пользователя.');
       return false;
     }
     if (!this.userService.isAdmin(tgUser.id)) {
-      ctx.reply('⛔ Эта функция доступна только администраторам.');
-      return false;
+      const dbUser = await this.userService.findByTelegramId(tgUser.id);
+      if (dbUser?.role !== 'admin') {
+        ctx.reply('⛔ Эта функция доступна только администраторам.');
+        return false;
+      }
     }
     return true;
   }

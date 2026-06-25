@@ -171,7 +171,8 @@ export class BotService {
 
   async showMenu(ctx: Context) {
     const tgUser = ctx.from;
-    const isAdmin = tgUser ? this.userService.isAdmin(tgUser.id) : false;
+    const dbUser = tgUser ? await this.userService.findByTelegramId(tgUser.id) : null;
+    const isAdmin = tgUser ? (this.userService.isAdmin(tgUser.id) || dbUser?.role === 'admin') : false;
 
     if (isAdmin) {
       // Admin-only clean menu
@@ -191,7 +192,8 @@ export class BotService {
 
   async botMenu(ctx: Context) {
     const tgUser = ctx.from;
-    const isAdmin = tgUser ? this.userService.isAdmin(tgUser.id) : false;
+    const dbUser = tgUser ? await this.userService.findByTelegramId(tgUser.id) : null;
+    const isAdmin = tgUser ? (this.userService.isAdmin(tgUser.id) || dbUser?.role === 'admin') : false;
 
     const keyboard: any[][] = [
       ['🔌 Подключить VPN'],
@@ -846,27 +848,33 @@ export class BotService {
       [
         Markup.button.callback('⚙️ Управление подпиской', `submgmt_${user.id}`),
       ],
-      (user.role === 'admin'
-        ? [Markup.button.callback('👤 Сделать User', `er_user_${user.id}`), Markup.button.callback('🛟 Сделать Саппортом', `er_support_${user.id}`)]
-        : user.role === 'support'
-        ? [Markup.button.callback('👑 Сделать Admin', `er_admin_${user.id}`), Markup.button.callback('👤 Сделать User', `er_user_${user.id}`)]
-        : [Markup.button.callback('👑 Сделать Admin', `er_admin_${user.id}`), Markup.button.callback('🛟 Сделать Саппортом', `er_support_${user.id}`)]
-      ),
-      [
-        user.userIsActive
-          ? Markup.button.callback('🚫 Деактивировать', `ea_false_${user.id}`)
-          : Markup.button.callback('✅ Активировать', `ea_true_${user.id}`),
-      ],
-      [
-        user.userIsBlocked
-          ? Markup.button.callback('🔓 Разблокировать', `unblock_${user.telegramId}`)
-          : Markup.button.callback('🚫 Заблокировать', `block_${user.telegramId}`),
-      ],
-      [
-        Markup.button.callback('📅 Подписка +7д', `subadd_${user.id}`),
-        Markup.button.callback('🗑 Удалить', `del_${user.id}`),
-        Markup.button.callback('🔙 К списку', 'edit_users'),
-      ],
+      ...(this.userService.isAdmin(user.telegramId) ? [] : [
+        ...(user.role === 'admin'
+          ? [[Markup.button.callback('👤 Сделать User', `er_user_${user.id}`), Markup.button.callback('🛟 Сделать Саппортом', `er_support_${user.id}`)]]
+          : user.role === 'support'
+          ? [[Markup.button.callback('👑 Сделать Admin', `er_admin_${user.id}`), Markup.button.callback('👤 Сделать User', `er_user_${user.id}`)]]
+          : [[Markup.button.callback('👑 Сделать Admin', `er_admin_${user.id}`), Markup.button.callback('🛟 Сделать Саппортом', `er_support_${user.id}`)]]
+        ),
+      ]),
+      ...(this.userService.isAdmin(user.telegramId) ? [
+        [Markup.button.callback('🔙 К списку', 'edit_users')],
+      ] : [
+        [
+          user.userIsActive
+            ? Markup.button.callback('🚫 Деактивировать', `ea_false_${user.id}`)
+            : Markup.button.callback('✅ Активировать', `ea_true_${user.id}`),
+        ],
+        [
+          user.userIsBlocked
+            ? Markup.button.callback('🔓 Разблокировать', `unblock_${user.telegramId}`)
+            : Markup.button.callback('🚫 Заблокировать', `block_${user.telegramId}`),
+        ],
+        [
+          Markup.button.callback('📅 Подписка +7д', `subadd_${user.id}`),
+          Markup.button.callback('🗑 Удалить', `del_${user.id}`),
+          Markup.button.callback('🔙 К списку', 'edit_users'),
+        ],
+      ]),
     ];
 
     await this.replyOrEdit(ctx, info, {

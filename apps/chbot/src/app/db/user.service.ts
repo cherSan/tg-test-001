@@ -38,7 +38,7 @@ export class UserService {
   async isAdminOrSupport(telegramId: number): Promise<boolean> {
     if (this.isAdmin(telegramId)) return true;
     const user = await this.findByTelegramId(telegramId);
-    return user?.role === 'support';
+    return user?.role === 'admin' || user?.role === 'support';
   }
 
   /** Get admin Telegram IDs from env */
@@ -54,13 +54,10 @@ export class UserService {
   async findOrCreate(telegramProfile: TelegramProfile): Promise<{ user: User; created: boolean }> {
     const existing = await this.findByTelegramId(telegramProfile.id);
     if (existing) {
-      // Sync admin role based on env (in case admins change)
+      // Only upgrade to admin if in ADMIN_IDS, never downgrade manually assigned roles
       const shouldBeAdmin = this.isAdmin(telegramProfile.id);
       if (shouldBeAdmin && existing.role !== 'admin') {
         existing.role = 'admin';
-        await this.userRepo.save(existing);
-      } else if (!shouldBeAdmin && existing.role === 'admin') {
-        existing.role = 'user';
         await this.userRepo.save(existing);
       }
       const updated = await this.updateProfile(existing, telegramProfile);

@@ -833,13 +833,12 @@ export class BotUpdate {
     const stIcon = ticket.status === 'open' ? '🟢' : '🔴';
     const stText = ticket.status === 'open' ? 'Открыт' : 'Закрыт';
 
-    // Look up user's telegramId for edit link
-    const ticketOwner = await this.userService.findById(ticket.userId);
-    const tgId = ticketOwner?.telegramId;
+    // Edit button only for admins (not support)
+    const isAdmin = ctx.from ? this.userService.isAdmin(ctx.from.id) : false;
 
     const buttons: any[][] = [];
-    if (tgId) {
-      buttons.push([Markup.button.callback(`👤 ${ticketOwner!.firstName || 'ID ' + tgId}`, `edit_user_${tgId}`)]);
+    if (isAdmin) {
+      buttons.push([Markup.button.callback('✏️ Редактировать', `edit_user_${ticket.userId}`)]);
     }
     if (ticket.status === 'open') {
       buttons.push([Markup.button.callback('📝 Ответить', `replyticket_${ticket.id}`)]);
@@ -849,7 +848,7 @@ export class BotUpdate {
 
     await ctx.reply(
       `${stIcon} **Тикет #${ticket.id} ${stText}**\n` +
-      `👤 ${ticketOwner ? ticketOwner.firstName || ticketOwner.username || 'ID ' + tgId : 'ID ' + ticket.userId}\n` +
+      `👤 ID пользователя: \`${ticket.userId}\`\n` +
       `📌 Тема: ${ticket.topic}\n` +
       `💬 Сообщение: ${ticket.message}\n` +
       `📅 ${ticket.createdAt.toISOString().replace('T', ' ').slice(0, 19)}` +

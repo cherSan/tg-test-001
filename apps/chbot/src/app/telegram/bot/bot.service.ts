@@ -796,7 +796,7 @@ export class BotService {
     const users = await this.userService.findPending();
 
     if (users.length === 0) {
-      await this.replyOrEdit(ctx, '✅ Нет пользователей, ожидающих активации.');
+      await this.replyOrEdit(ctx, '✅ Нет пользователей, ожидающих активации.', { ...Markup.inlineKeyboard([[Markup.button.callback('🔙 Назад', 'show_menu')]]) });
       return;
     }
 
@@ -806,6 +806,7 @@ export class BotService {
       return [Markup.button.callback(label, `edit_user_${u.telegramId}`)];
     });
 
+    buttons.push([Markup.button.callback('🔙 Назад', 'show_menu')]);
 
     const message = `⏳ **Ожидают активации** (${users.length}):`;
     await this.replyOrEdit(ctx, message, {
@@ -921,27 +922,65 @@ export class BotService {
       const active = k.subscriptionExpiresAt && new Date(k.subscriptionExpiresAt) > now;
       const status = active ? '✅' : '❌';
       const expiry = k.subscriptionExpiresAt ? this.formatMskDate(k.subscriptionExpiresAt) : 'нет';
-      keysText += `🔑 Key${k.keyIndex}: ${status} до ${expiry} (пир: \`${k.peerId.slice(0, 8)}...\`)\n`;
+      keysText += `🔑 Key${k.keyIndex}: ${status} до ${expiry}\n`;
     }
+    if (keys.length === 0) keysText = '🔐 Нет ключей';
 
-    if (keys.length === 0) {
-      keysText = '🔐 Нет ключей';
+    // Per-key buttons
+    const keyButtons: any[][] = [];
+    for (const k of keys) {
+      const active = k.subscriptionExpiresAt && new Date(k.subscriptionExpiresAt) > now;
+      keyButtons.push([
+        Markup.button.callback(
+          `🔑 Key${k.keyIndex} — ${active ? '✅' : '❌'} ${k.subscriptionExpiresAt ? this.formatMskDate(k.subscriptionExpiresAt) : 'нет'}`,
+          `admkey_${k.id}`,
+        ),
+      ]);
     }
-
-    const message =
-      `⚙️ **Управление подпиской**\n\n` +
-      `${keysText}\n` +
-      `Выберите действие:`;
 
     const buttons: any[][] = [
-      [Markup.button.callback('✏️ Изменить время подписки', `ef_subscriptionExpiresAt_${user.id}`)],
+      ...keyButtons,
+      [Markup.button.callback('📅 Создать ключ', `subadd_${user.id}`)],
       [Markup.button.callback('🔙 Назад', `edit_user_${user.telegramId}`)],
     ];
 
-    await this.replyOrEdit(ctx, message, {
-      parse_mode: 'Markdown',
-      ...Markup.inlineKeyboard(buttons),
-    });
+    await this.replyOrEdit(ctx,
+      `⚙️ **Управление подпиской**\n\n${keysText}\nВыберите действие:`,
+      { parse_mode: 'Markdown', ...Markup.inlineKeyboard(buttons) },
+    );
+  }
+
+  /** Show individual key management for admin */
+  async showAdminKeyActions(ctx: Context, keyId: number) {
+    const key = await this.vpnKeyService.findById(keyId);
+    if (!key) { await this.replyOrEdit(ctx, '❌ Ключ не найден.'); return; }
+
+    const user = await this.userService.findById(key.userId);
+    const subActive = key.subscriptionExpiresAt && new Date(key.subscriptionExpiresAt) > new Date();
+
+    // Check actual AmneziaWG client state
+    let clientEnabled = true;
+    try {
+      const clients = await this.hidefoxService.listClients();
+      const c = clients.find((c: any) => c.id === key.peerId);
+      clientEnabled = c?.enabled ?? true;
+    } catch (_) {}
+
+    const toggleLabel = clientEnabled ? '🔴 Отключить' : '🟢 Включить';
+    const toggleAction = clientEnabled ? 'disable' : 'enable';
+    const clientStatus = clientEnabled ? '🟢 Клиент активен' : '🔴 Клиент отключён';
+
+    const buttons: any[][] = [
+      [Markup.button.callback('📅 Продлить на N дней', `adm_extend_input_${key.id}`)],
+      [Markup.button.callback(toggleLabel, `togclient_${key.id}_${toggleAction}`)],
+      [Markup.button.callback('🗑 Удалить ключ', `adm_delkey_${key.id}`)],
+      [Markup.button.callback('🔙 Назад', `submgmt_${user?.id || 0}`)],
+    ];
+
+    await this.replyOrEdit(ctx,
+      `🔑 **Key${key.keyIndex}**\n📅 Подписка: ${subActive ? '✅' : '❌'} до ${key.subscriptionExpiresAt ? this.formatMskDate(key.subscriptionExpiresAt) : 'нет'}\n${clientStatus}\n🔐 Пир: \`${key.peerId.slice(0, 16)}...\`\n\nВыберите действие:`,
+      { parse_mode: 'Markdown', ...Markup.inlineKeyboard(buttons) },
+    );
   }
 
   /** Toggle HideFox VPN client enabled/disabled by key ID */
@@ -1161,6 +1200,7 @@ export class BotService {
         ]),
       });
     }
+    await this.replyOrEdit(ctx, "Выберите действие:", { ...Markup.inlineKeyboard([[Markup.button.callback("🔙 Назад", "show_menu")]]) });
   }
 
   /** Generate one-time config link for a key */

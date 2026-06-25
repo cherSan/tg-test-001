@@ -396,6 +396,8 @@ export class BotUpdate {
   async onCancelAction(@Ctx() ctx: Context & { session: SessionData }) {
     if (!this.checkActionSpam(ctx)) { await ctx.answerCbQuery().catch(() => {}); return; }
     await ctx.answerCbQuery();
+    const hasAction = ctx.session?.depositFlow || ctx.session?.ticketFlow || ctx.session?.ticketAdmin || ctx.session?.awaitingEditField;
+    if (hasAction) await ctx.reply('❌ Действие отменено.');
     if (ctx.session?.depositFlow) {
       ctx.session.depositFlow = undefined;
       await this.botService.showTopUpBalance(ctx);
@@ -736,7 +738,7 @@ export class BotUpdate {
 
     const tickets = await this.ticketService.findOpen();
     if (tickets.length === 0) {
-      await ctx.reply('✅ Нет открытых тикетов.');
+      await ctx.reply('✅ Нет открытых тикетов.', { ...Markup.inlineKeyboard([[Markup.button.callback('🔙 Назад', 'show_menu')]]) });
       return;
     }
 
@@ -746,6 +748,7 @@ export class BotUpdate {
     const buttons: any[][] = tickets.slice(0, 10).map((t) => [
       Markup.button.callback(`#${t.id} [ID:${t.userId}]: ${t.topic.slice(0, 25)}`, `viewticket_${t.id}`),
     ]);
+    buttons.push([Markup.button.callback('🔙 Назад', 'show_menu')]);
 
     await ctx.reply('🛟 **Тикеты пользователей**', {
       parse_mode: 'Markdown',
@@ -830,7 +833,14 @@ export class BotUpdate {
     const stIcon = ticket.status === 'open' ? '🟢' : '🔴';
     const stText = ticket.status === 'open' ? 'Открыт' : 'Закрыт';
 
+    // Look up user's telegramId for edit link
+    const ticketOwner = await this.userService.findById(ticket.userId);
+    const tgId = ticketOwner?.telegramId;
+
     const buttons: any[][] = [];
+    if (tgId) {
+      buttons.push([Markup.button.callback(`👤 ${ticketOwner!.firstName || 'ID ' + tgId}`, `edit_user_${tgId}`)]);
+    }
     if (ticket.status === 'open') {
       buttons.push([Markup.button.callback('📝 Ответить', `replyticket_${ticket.id}`)]);
       buttons.push([Markup.button.callback('🔴 Закрыть тикет', `closeticket_${ticket.id}`)]);
@@ -839,7 +849,7 @@ export class BotUpdate {
 
     await ctx.reply(
       `${stIcon} **Тикет #${ticket.id} ${stText}**\n` +
-      `👤 ID пользователя: \`${ticket.userId}\`\n` +
+      `👤 ${ticketOwner ? ticketOwner.firstName || ticketOwner.username || 'ID ' + tgId : 'ID ' + ticket.userId}\n` +
       `📌 Тема: ${ticket.topic}\n` +
       `💬 Сообщение: ${ticket.message}\n` +
       `📅 ${ticket.createdAt.toISOString().replace('T', ' ').slice(0, 19)}` +
@@ -1685,35 +1695,79 @@ export class BotUpdate {
 
   /** Admin: add 7 days to user subscription */
   @Action(/^subadd_(\d+)$/)
-  async onSubAdd(@Ctx() ctx: Context) {
+  async onSubAdd(@Ctx() ctx: Context & { session: SessionData }) {
     if (!this.checkActionSpam(ctx)) { await ctx.answerCbQuery().catch(() => {}); return; }
     await ctx.answerCbQuery();
     if (!this.checkAdmin(ctx)) return;
-
     const match = (ctx as any).match;
     const userId = parseInt(match[1], 10);
     const user = await this.userService.findById(userId);
-
-    if (!user) {
-      await ctx.reply('❌ Пользователь не найден.');
-      return;
-    }
-
-    // Create a new 7-day key
-    const result = await this.botService.provisionKey(user, 168);
-    if (result) {
-      await this.botService.notifyUser(ctx, user.telegramId, `📅 Администратор **${ctx.from!.first_name || 'Администратор'}** создал Вам новый ключ **Key${result.key.keyIndex}** до ${this.botService.formatMskDate(result.key.subscriptionExpiresAt!)}`);
-      await ctx.reply(
-        `📅 Ключ **Key${result.key.keyIndex}** создан до **${this.botService.formatMskDate(result.key.subscriptionExpiresAt!)}**`,
-        { parse_mode: 'Markdown' },
-      );
-    } else {
-      await ctx.reply('❌ Не удалось создать ключ.');
-    }
-    await this.botService.showUserEditFields(ctx, (await this.userService.findById(userId))!);
+    if (!user) { await ctx.reply('❌ Пользователь не найден.'); return; }
+    ctx.session.awaitingEditField = { userId, field: 'create_key_days' as any };
+    await ctx.reply('📅 Введите количество дней для нового ключа:', {
+      parse_mode: 'Markdown',
+      ...Markup.inlineKeyboard([[Markup.button.callback('❌ Отменить', 'cancel_action')]]),
+    });
   }
 
-  /** Open subscription management for a user (admin) */
+  @Action(/^admkey_(\d+)$/)
+  async onAdminKeyActions(@Ctx() ctx: Context) {
+    if (!this.checkActionSpam(ctx)) { await ctx.answerCbQuery().catch(() => {}); return; }
+    await ctx.answerCbQuery();
+    if (!this.checkAdmin(ctx)) return;
+    const match = (ctx as any).match;
+    await this.botService.showAdminKeyActions(ctx, parseInt(match[1], 10));
+  }
+
+  @Action(/^adm_extend_input_(\d+)$/)
+  async onAdminExtendInput(@Ctx() ctx: Context & { session: SessionData }) {
+    if (!this.checkActionSpam(ctx)) { await ctx.answerCbQuery().catch(() => {}); return; }
+    await ctx.answerCbQuery();
+    if (!this.checkAdmin(ctx)) return;
+    const match = (ctx as any).match;
+    const keyId = parseInt(match[1], 10);
+    ctx.session.awaitingEditField = { userId: keyId, field: 'adm_extend_days' as any };
+    await ctx.reply('📅 Введите количество дней для продления:', {
+      parse_mode: 'Markdown',
+      ...Markup.inlineKeyboard([[Markup.button.callback('❌ Отменить', 'cancel_action')]]),
+    });
+  }
+
+  @Action(/^adm_delkey_(\d+)$/)
+  async onAdminDeleteKey(@Ctx() ctx: Context) {
+    if (!this.checkActionSpam(ctx)) { await ctx.answerCbQuery().catch(() => {}); return; }
+    await ctx.answerCbQuery();
+    if (!this.checkAdmin(ctx)) return;
+    const match = (ctx as any).match;
+    const keyId = parseInt(match[1], 10);
+    const key = await this.botService.getVpnKey(keyId);
+    if (!key) { await ctx.reply('❌ Ключ не найден.'); return; }
+    await ctx.reply(
+      '⚠️ **Удалить ключ Key' + key.keyIndex + '?**\n\nЭто действие необратимо!',
+      { parse_mode: 'Markdown', ...Markup.inlineKeyboard([
+        [Markup.button.callback('✅ Да, удалить', 'adm_delconfirm_' + keyId)],
+        [Markup.button.callback('❌ Нет', 'admkey_' + keyId)],
+      ])},
+    );
+  }
+
+  @Action(/^adm_delconfirm_(\d+)$/)
+  async onAdminDeleteConfirm(@Ctx() ctx: Context) {
+    if (!this.checkActionSpam(ctx)) { await ctx.answerCbQuery().catch(() => {}); return; }
+    await ctx.answerCbQuery();
+    if (!this.checkAdmin(ctx)) return;
+    const match = (ctx as any).match;
+    const key = await this.botService.getVpnKey(parseInt(match[1], 10));
+    if (!key) { await ctx.reply('❌ Ключ не найден.'); return; }
+    const user = await this.userService.findById(key.userId);
+    await this.botService.deleteKey(key);
+    if (user) {
+      await this.botService.notifyUser(ctx, user.telegramId, '🗑 Администратор **' + ctx.from!.first_name + '** удалил Ваш ключ **Key' + key.keyIndex + '**.');
+      await this.botService.showSubscriptionManagement(ctx, user);
+    }
+    await ctx.reply('🗑 Ключ Key' + key.keyIndex + ' удалён.');
+  }
+
   @Action(/^submgmt_(\d+)$/)
   async onSubMgmt(@Ctx() ctx: Context) {
     if (!this.checkActionSpam(ctx)) { await ctx.answerCbQuery().catch(() => {}); return; }
@@ -1740,19 +1794,28 @@ export class BotUpdate {
     if (!this.checkAdmin(ctx)) return;
 
     const match = (ctx as any).match;
-    const userId = parseInt(match[1], 10);
+    const keyId = parseInt(match[1], 10);
     const action = match[2] as 'enable' | 'disable';
 
-    const ok = await this.botService.toggleClient(userId, action === 'enable');
-    const user = await this.userService.findById(userId);
+    const ok = await this.botService.toggleClient(keyId, action === 'enable');
+    const key = await this.botService.getVpnKey(keyId);
+    const user = key ? await this.userService.findById(key.userId) : null;
 
-    if (!user) {
-      await ctx.reply('❌ Пользователь не найден.');
+    if (!user || !key) {
+      await ctx.reply('❌ Ключ или пользователь не найден.');
       return;
     }
 
     if (ok) {
       const label = action === 'enable' ? 'включён' : 'отключён';
+      await this.botService.notifyUser(ctx, user.telegramId, `🔐 Администратор **${ctx.from!.first_name || 'Администратор'}** ${label} Ваш VPN-ключ **Key${key.keyIndex}**.`);
+      await this.botService.showAdminKeyActions(ctx, keyId);
+      return;
+    } else {
+      await ctx.reply('❌ Не удалось изменить состояние клиента.');
+    }
+    if (ok) {
+      const label = action === 'enable' ? 'включил' : 'отключил';
       await this.botService.notifyUser(ctx, user.telegramId, `🔐 Администратор **${ctx.from!.first_name || 'Администратор'}** ${label} Ваш VPN-ключ.`);
       await ctx.answerCbQuery(`✅ Клиент ${label}`);
     } else {
@@ -2217,6 +2280,41 @@ export class BotUpdate {
       ctx.session.awaitingEditField = undefined;
       // Redirect back to admin tickets list
       await this.showAdminTickets(ctx);
+      return;
+    }
+
+    if (field === 'adm_extend_days') {
+      const days = parseInt(text.trim(), 10);
+      ctx.session.awaitingEditField = undefined;
+      if (isNaN(days) || days < 1) { await ctx.reply("❌ Введите положительное число дней."); return; }
+      const key = await this.botService.getVpnKey(userId);
+      if (!key) { await ctx.reply("❌ Ключ не найден."); return; }
+      const newExpiry = new Date(new Date(key.subscriptionExpiresAt!).getTime() + days * 86400_000);
+      await this.botService.vpnKeyService.update(key.id, { subscriptionExpiresAt: newExpiry });
+      await this.botService.hidefoxService.updateClientExpireDate(key.peerId, newExpiry.toISOString());
+      const u = await this.userService.findById(key.userId);
+      if (u) {
+        await this.botService.notifyUser(ctx, u.telegramId, "📅 Администратор **" + ctx.from!.first_name + "** продлил Ваш ключ **Key" + key.keyIndex + "** на " + days + " дн.");
+        await this.botService.showSubscriptionManagement(ctx, u);
+      }
+      await ctx.reply("✅ Ключ Key" + key.keyIndex + " продлён на " + days + " дн.");
+      return;
+    }
+
+    if (field === "create_key_days") {
+      const days = parseInt(text.trim(), 10);
+      ctx.session.awaitingEditField = undefined;
+      if (isNaN(days) || days < 1) { await ctx.reply("❌ Введите положительное число дней."); return; }
+      const u = await this.userService.findById(userId);
+      if (!u) { await ctx.reply("❌ Пользователь не найден."); return; }
+      const result = await this.botService.provisionKey(u, days * 24);
+      if (result) {
+        await this.botService.notifyUser(ctx, u.telegramId, "📅 Администратор **" + ctx.from!.first_name + "** создал Вам новый ключ **Key" + result.key.keyIndex + "** на " + days + " дн.");
+        await ctx.reply("📅 Ключ **Key" + result.key.keyIndex + "** создан на " + days + " дн.", { parse_mode: "Markdown" });
+      } else {
+        await ctx.reply("❌ Не удалось создать ключ.");
+      }
+      await this.botService.showUserEditFields(ctx, (await this.userService.findById(userId))!);
       return;
     }
 

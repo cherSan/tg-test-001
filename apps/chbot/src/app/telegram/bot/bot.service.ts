@@ -206,7 +206,7 @@ export class BotService {
 
   async botMenu(ctx: Context) {
     await this.replyOrEdit(ctx, 
-      ' ',
+      'Меню',
       Markup.keyboard([
         ['🔌 Подключить VPN'],
         ['👤 Профиль', '🎁 Реферальная программа'],
@@ -276,7 +276,7 @@ export class BotService {
       // Send keyboard immediately
       await ctx.telegram.sendMessage(
         telegramId,
-        ' ',
+        'Меню',
         Markup.keyboard([
           ['🔌 Подключить VPN'],
           ['👤 Профиль', '🎁 Реферальная программа'],
@@ -857,7 +857,7 @@ export class BotService {
 
   /** Parse user-entered date string as MSK time, returns UTC Date */
   parseMskDate(text: string): Date | null {
-    const clean = text.trim().replace(' ', 'T');
+    const clean = text.trim().replace('Меню', 'T');
     // If no timezone specified, treat as MSK (+03:00)
     const withTz = clean.includes('+') || clean.includes('Z') || clean.endsWith('Z')
       ? clean

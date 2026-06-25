@@ -157,7 +157,7 @@ export class BotService {
   }
 
   getWelcomeMessage(username: string): string {
-    return `Привет, ${username}! Рад приветствовать тебя!.`;
+    return `Вас приветствует сервис HideFox VPN.`;
   }
 
   processText(text: string): string {
@@ -206,7 +206,7 @@ export class BotService {
 
   async botMenu(ctx: Context) {
     await this.replyOrEdit(ctx, 
-      'Меню',
+      '🦊',
       Markup.keyboard([
         ['🔌 Подключить VPN'],
         ['👤 Профиль', '🎁 Реферальная программа'],
@@ -276,7 +276,7 @@ export class BotService {
       // Send keyboard immediately
       await ctx.telegram.sendMessage(
         telegramId,
-        'Меню',
+        '🦊',
         Markup.keyboard([
           ['🔌 Подключить VPN'],
           ['👤 Профиль', '🎁 Реферальная программа'],
@@ -686,12 +686,16 @@ export class BotService {
 
     // Check balance (skip for free plans)
     if (plan.usdt > 0 && (dbUser.userBalanceUSDT ?? 0) < plan.usdt) {
-      await this.replyOrEdit(ctx, 
+      await this.replyOrEdit(ctx,
         `❌ Недостаточно средств!\n\n` +
         `Тариф: **${plan.usdt}** USDT\n` +
-        `Ваш баланс: **${(dbUser.userBalanceUSDT ?? 0).toFixed(2)}** USDT\n\n` +
-        `Пополните баланс через «💳 Пополнить баланс».`,
-        { parse_mode: 'Markdown' },
+        `Ваш баланс: **${(dbUser.userBalanceUSDT ?? 0).toFixed(2)}** USDT`,
+        {
+          parse_mode: 'Markdown',
+          ...Markup.inlineKeyboard([
+            [Markup.button.callback('💳 Пополнить баланс', 'top_up')],
+          ]),
+        },
       );
       return false;
     }
@@ -857,7 +861,7 @@ export class BotService {
 
   /** Parse user-entered date string as MSK time, returns UTC Date */
   parseMskDate(text: string): Date | null {
-    const clean = text.trim().replace('Меню', 'T');
+    const clean = text.trim().replace('🦊', 'T');
     // If no timezone specified, treat as MSK (+03:00)
     const withTz = clean.includes('+') || clean.includes('Z') || clean.endsWith('Z')
       ? clean

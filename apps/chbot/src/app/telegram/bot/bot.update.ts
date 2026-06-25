@@ -128,8 +128,7 @@ export class BotUpdate {
       if (this.userService.isAdmin(user.telegramId)) {
         await this.userService.update(user.id, { userIsActive: true });
         const username = user.firstName || tgUser.first_name || 'пользователь';
-        const message = this.botService.getWelcomeMessage(username);
-        await ctx.reply(`${message} ✅ Ваш аккаунт автоматически активирован (админ).`);
+        await ctx.reply(this.botService.getWelcomeMessage(username) + ' ✅ Ваш аккаунт автоматически активирован (админ).');
         await this.botService.botMenu(ctx);
         return;
       }
@@ -144,8 +143,7 @@ export class BotUpdate {
 
     // Active user — normal flow
     const username = user.firstName || tgUser.first_name || 'пользователь';
-    const message = this.botService.getWelcomeMessage(username);
-    await ctx.reply(`${message} 👋 С возвращением!`);
+    await ctx.reply(this.botService.getWelcomeMessage(username));
     await this.botService.botMenu(ctx);
   }
 
@@ -434,26 +432,40 @@ export class BotUpdate {
     if (!(await this.checkActive(ctx))) return;
 
     const tgUser = ctx.from!;
-    const maxOpen = parseInt(process.env.MAX_OPEN_TICKETS || '3', 10);
-    const openCount = await this.ticketService.countOpenByUserId(tgUser.id);
-
     const dbUser = await this.userService.findByTelegramId(tgUser.id);
     const hasSub = dbUser ? await this.botService.hasActiveSubscription(dbUser) : false;
+    const hasBalance = (dbUser?.userBalanceUSDT ?? 0) > 0;
+    const onlySub = process.env.ENABLE_TICKET_ONLY_SUB !== 'false';
+
+    const maxOpen = parseInt(
+      process.env[hasSub ? 'MAX_OPEN_TICKETS' : 'MAX_OPEN_TICKETS_NO_SUB'] || '3', 10,
+    );
+    const openCount = await this.ticketService.countOpenByUserId(tgUser.id);
     const cooldownMin = parseInt(process.env[hasSub ? 'TICKET_TIME_WITH_SUB' : 'TICKET_TIME_NO_SUB'] || '10', 10);
+
+    const canCreate = !onlySub || hasSub || hasBalance;
+    let warningText = '';
+    if (!canCreate) {
+      warningText = `⚠️ Создание тикетов для Вас сейчас недоступно. Ваш баланс должен быть положительный или иметься текущие подписки.\n\n`;
+    }
+
+    const buttons: any[][] = [];
+    if (canCreate) {
+      buttons.push([Markup.button.callback('📝 Создать тикет', 'new_ticket')]);
+    }
+    buttons.push([Markup.button.callback('📋 Текущие тикеты', 'my_tickets')]);
+    buttons.push([Markup.button.callback('📁 Закрытые тикеты', 'closed_tickets')]);
+    buttons.push([Markup.button.callback('🔙 Назад', 'my_subscription')]);
 
     await ctx.reply(
       `🛟 **Техническая поддержка**\n\n` +
       `📊 Открыто тикетов: ${openCount}/${maxOpen}\n` +
       `⏱ Интервал между тикетами: ${cooldownMin} мин.\n\n` +
+      `${warningText}` +
       `Выберите действие:`,
       {
         parse_mode: 'Markdown',
-        ...Markup.inlineKeyboard([
-          [Markup.button.callback('📝 Создать тикет', 'new_ticket')],
-          [Markup.button.callback('📋 Текущие тикеты', 'my_tickets')],
-          [Markup.button.callback('📁 Закрытые тикеты', 'closed_tickets')],
-          [Markup.button.callback('🔙 Назад', 'my_subscription')],
-        ]),
+        ...Markup.inlineKeyboard(buttons),
       },
     );
   }
@@ -469,16 +481,19 @@ export class BotUpdate {
     const dbUser = await this.userService.findByTelegramId(tgUser.id);
     const hasSub = dbUser ? await this.botService.hasActiveSubscription(dbUser) : false;
     const hasBalance = (dbUser?.userBalanceUSDT ?? 0) > 0;
+    const onlySub = process.env.ENABLE_TICKET_ONLY_SUB !== 'false';
 
-    if (!hasSub && !hasBalance) {
+    if (onlySub && !hasSub && !hasBalance) {
       await ctx.reply(
-        '⚠️ Для создания обращения необходима активная подписка или баланс > 0.',
+        '⚠️ Создание тикетов для Вас сейчас недоступно. Ваш баланс должен быть положительный или иметься текущие подписки.',
         { parse_mode: 'Markdown' },
       );
       return;
     }
 
-    const maxOpen = parseInt(process.env.MAX_OPEN_TICKETS || '3', 10);
+    const maxOpen = parseInt(
+      process.env[hasSub ? 'MAX_OPEN_TICKETS' : 'MAX_OPEN_TICKETS_NO_SUB'] || '3', 10,
+    );
     const openCount = await this.ticketService.countOpenByUserId(tgUser.id);
     if (openCount >= maxOpen) {
       await ctx.reply(
@@ -844,6 +859,7 @@ export class BotUpdate {
 
     const code = dbUser.referralCode || '—';
     const stats = await this.botService.getReferralStats(dbUser.telegramId);
+    const hoursSinceReg = (Date.now() - new Date(dbUser.createdAt!).getTime()) / 3600_000;
 
     const rewardType = process.env.REFERRAL_REWARD_TYPE || 'usdt';
     const { percent, level } = this.botService.getReferralLevel(stats.activeReferrals);
@@ -872,7 +888,11 @@ export class BotUpdate {
       [Markup.button.callback('🔗 Поделиться ссылкой', 'share_ref')],
     ];
     if (!dbUser.referrerId) {
-      buttons.push([Markup.button.callback('✏️ Добавить пригласившего', 'set_referrer')]);
+      const windowH = parseInt(process.env.REFERRAL_WINDOW_HOURS || '72', 10);
+      const elapsed = (Date.now() - new Date(dbUser.createdAt!).getTime()) / 3600_000;
+      if (elapsed <= windowH) {
+        buttons.push([Markup.button.callback('✏️ Добавить пригласившего', 'set_referrer')]);
+      }
     }
     buttons.push([Markup.button.callback('🔙 Назад', 'my_subscription')]);
 
@@ -891,11 +911,15 @@ export class BotUpdate {
       `${refInviteLine}` +
       `⭐ Ваш уровень: ${level} (${percent}%)\n` +
       `🎁 Единоразовый приветственный бонус за каждого нового, пополнившего баланс, реферала: **${firstBonus} ${unit}**\n\n` +
-      `💡 Наша реферальная программа помогает пользоваться сервисом бесплатно! ` +
-      `С большим кол-вом рефералов, Вам не придется платить за сервис! ` +
-      `% от пополнения каждого реферала, возвращается Вам на баланс!\n\n` +
+      `💡 Хотите не платить за сервис? Наша реферальная программа даёт такую возможность! ` +
+      `Делитесь ссылкой с друзьями, а мы будем переводить вам часть их оплат. ` +
+      `Когда друзей станет много, Ваша подписка станет полностью бесплатной.\n\n` +
       `📊 Уровни рефералов:\n${levelsText}\n` +
-      `🔗 Ваша ссылка:\n\`t.me/Amnbot3bot?start=ref${code}\`\n\n` +
+      `🔗 Ваша ссылка реф. программы:\n\`t.me/Amnbot3bot?start=ref${code}\`\n\n` +
+      `Скопируйте и отправьте Вашу ссылку друзьям или создайте приглашение, нажав на кнопку «Поделиться ссылкой».` +
+      (!dbUser.referrerId && hoursSinceReg <= (parseInt(process.env.REFERRAL_WINDOW_HOURS || '72', 10))
+        ? `\n\n✏️ Вы можете добавить пригласившего. Воспользоваться можно 1 раз, не позднее **${process.env.REFERRAL_WINDOW_HOURS || '72'} ч.** после регистрации.`
+        : '') + `\n\n` +
       `📊 Статистика:\n` +
       `👥 Приглашено: ${stats.totalReferrals}\n` +
       `💳 Активных: ${stats.activeReferrals}\n` +
@@ -930,6 +954,21 @@ export class BotUpdate {
   async onSetReferrer(@Ctx() ctx: Context & { session: SessionData }) {
     if (!this.checkActionSpam(ctx)) { await ctx.answerCbQuery().catch(() => {}); return; }
     await ctx.answerCbQuery();
+    const tgUser = ctx.from!;
+    const dbUser = await this.userService.findByTelegramId(tgUser.id);
+    if (!dbUser) return;
+
+    // Check time window
+    const windowHours = parseInt(process.env.REFERRAL_WINDOW_HOURS || '72', 10);
+    const hoursSinceReg = (Date.now() - new Date(dbUser.createdAt!).getTime()) / 3600_000;
+    if (hoursSinceReg > windowHours) {
+      await ctx.reply(`⏳ Время для добавления реферала истекло (${windowHours} ч. после регистрации).`);
+      return;
+    }
+    if (dbUser.referrerId) {
+      await ctx.reply('❌ Реферал уже добавлен.');
+      return;
+    }
     ctx.session.awaitingEditField = { userId: 0, field: 'referrer_code' as any };
     await ctx.reply(
       '✏️ Введите **реферальный код** друга:',

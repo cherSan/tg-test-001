@@ -344,7 +344,7 @@ export class BotUpdate {
   @Help()
   async help(@Ctx() ctx: Context) {
     if (!(await this.checkActive(ctx))) return;
-    await ctx.reply('Доступные команды: /start, /help. Или просто отправьте текст.');
+    await this.showSupportMenu(ctx);
   }
 
   // ─── Keyboard button handlers ────────────────────────────
@@ -411,7 +411,7 @@ export class BotUpdate {
     }
     if (ctx.session?.ticketAdmin) {
       ctx.session.ticketAdmin = undefined;
-      if (this.isAdminOrSupport(ctx)) {
+      if (await this.isAdminOrSupport(ctx)) {
         await this.showAdminTickets(ctx);
       } else {
         await this.showSupportMenu(ctx);
@@ -711,7 +711,7 @@ export class BotUpdate {
     }
 
     const tgUser = ctx.from!;
-    if (ticket.userId !== tgUser.id && !this.checkAdmin(ctx) && !this.checkSupport(ctx)) {
+    if (ticket.userId !== tgUser.id && !(await this.isAdminOrSupport(ctx))) {
       await ctx.answerCbQuery('⛔ Нет доступа.');
       return;
     }
@@ -731,7 +731,8 @@ export class BotUpdate {
 
   /** Shared admin tickets list (no answerCbQuery) */
   private async showAdminTickets(ctx: Context) {
-    if (!this.checkAdmin(ctx)) {
+    const isAdmin = ctx.from ? this.userService.isAdmin(ctx.from.id) : false;
+    if (!isAdmin) {
       const ok = await this.checkSupport(ctx);
       if (!ok) return;
     }
@@ -760,7 +761,7 @@ export class BotUpdate {
   async onViewTicket(@Ctx() ctx: Context & { session: SessionData }) {
     if (!this.checkActionSpam(ctx)) { await ctx.answerCbQuery().catch(() => {}); return; }
     await ctx.answerCbQuery();
-    if (!this.checkAdmin(ctx) && !(await this.checkSupport(ctx))) return;
+    if (!(await this.isAdminOrSupport(ctx))) return;
 
     const match = (ctx as any).match;
     const ticketId = parseInt(match[1], 10);
@@ -772,7 +773,7 @@ export class BotUpdate {
   async onReplyTicket(@Ctx() ctx: Context & { session: SessionData }) {
     if (!this.checkActionSpam(ctx)) { await ctx.answerCbQuery().catch(() => {}); return; }
     await ctx.answerCbQuery();
-    if (!this.checkAdmin(ctx) && !(await this.checkSupport(ctx))) return;
+    if (!(await this.isAdminOrSupport(ctx))) return;
 
     const match = (ctx as any).match;
     const ticketId = parseInt(match[1], 10);
@@ -793,7 +794,7 @@ export class BotUpdate {
   async onCloseTicket(@Ctx() ctx: Context & { session: SessionData }) {
     if (!this.checkActionSpam(ctx)) { await ctx.answerCbQuery().catch(() => {}); return; }
     await ctx.answerCbQuery();
-    if (!this.checkAdmin(ctx) && !(await this.checkSupport(ctx))) return;
+    if (!(await this.isAdminOrSupport(ctx))) return;
 
     const match = (ctx as any).match;
     const ticketId = parseInt(match[1], 10);
@@ -811,10 +812,13 @@ export class BotUpdate {
   }
 
   /** Check if user is admin or support — no side effects (no error messages) */
-  private isAdminOrSupport(ctx: Context): boolean {
+  private async isAdminOrSupport(ctx: Context): Promise<boolean> {
     const tgUser = ctx.from;
     if (!tgUser) return false;
-    return this.userService.isAdmin(tgUser.id) || this.botService.getSupportIds().includes(tgUser.id);
+    if (this.userService.isAdmin(tgUser.id)) return true;
+    if (this.botService.getSupportIds().includes(tgUser.id)) return true;
+    const dbUser = await this.userService.findByTelegramId(tgUser.id);
+    return dbUser?.role === 'support';
   }
 
   /** Show ticket info without answerCbQuery (safe for text context) */
@@ -1050,7 +1054,7 @@ export class BotUpdate {
   @Hears('🛟 Тикеты')
   async onKeyboardSupportTickets(@Ctx() ctx: Context) {
     if (!(await this.checkActive(ctx))) return;
-    await this.botService.showAdminTickets(ctx);
+    await this.showAdminTickets(ctx);
   }
 
   @Hears('ℹ️ Информация')
@@ -2003,7 +2007,7 @@ export class BotUpdate {
           }
 
           // Return to appropriate view
-          if (this.isAdminOrSupport(ctx)) {
+          if (await this.isAdminOrSupport(ctx)) {
             await this.showTicketInfo(ctx, ticketId);
           } else {
             await this.showSupportMenu(ctx);

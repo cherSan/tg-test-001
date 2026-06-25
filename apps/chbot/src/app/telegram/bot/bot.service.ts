@@ -184,13 +184,8 @@ export class BotService {
       ];
       await this.replyOrEdit(ctx, '⚙️ Админ-панель:', Markup.inlineKeyboard(buttons));
     } else {
-      // Regular user menu
-      const buttons: any[][] = [
-        [Markup.button.url('Читать правила', 'https://telegram.org')],
-        [Markup.button.callback('💰 Баланс', 'balance'), Markup.button.callback('💳 Пополнить баланс', 'top_up')],
-        [Markup.button.callback('Show menu', 'show_menu')],
-      ];
-      await this.replyOrEdit(ctx, 'Main menu:', Markup.inlineKeyboard(buttons));
+      // Regular user: just show the keyboard
+      await this.botMenu(ctx);
     }
   }
 
@@ -205,7 +200,7 @@ export class BotService {
     ];
     if (isAdmin) {
       keyboard.push(['⚙️ Админ']);
-    } else if (tgUser && this.userService.isAdminOrSupport(tgUser.id)) {
+    } else if (tgUser && await this.userService.isAdminOrSupport(tgUser.id)) {
       keyboard.push(['🛟 Тикеты']);
     }
 
@@ -458,7 +453,7 @@ export class BotService {
     const buttons: any[][] = [];
 
     if (activeKeys.length > 0) {
-      buttons.push([Markup.button.callback('🔐 Конфигурации VPN', 'vpn_config')]);
+      buttons.push([Markup.button.callback('🔐 Ключи для подключения VPN', 'vpn_config')]);
     }
     buttons.push([Markup.button.callback('🔌 Подключить VPN', 'buy')]);
     buttons.push([Markup.button.callback('💳 Пополнить баланс', 'top_up')]);
@@ -764,7 +759,7 @@ export class BotService {
     const { key } = result;
     const expiryStr = this.formatMskDate(key.subscriptionExpiresAt!);
     const vpnButton = Markup.inlineKeyboard([
-      [Markup.button.callback('🔐 Конфигурации VPN', 'vpn_config')],
+      [Markup.button.callback('🔐 Ключи для подключения VPN', 'vpn_config')],
       [Markup.button.callback('🔙 В меню', 'show_menu')],
     ]);
 
@@ -998,7 +993,7 @@ export class BotService {
     await this.replyOrEdit(ctx, '🔐 **Профиль**\n\nВыберите раздел:', {
       parse_mode: 'Markdown',
       ...Markup.inlineKeyboard([
-        [Markup.button.callback('🔐 Конфигурации VPN', 'vpn_keys')],
+        [Markup.button.callback('🔐 Ключи для подключения VPN', 'vpn_keys')],
         [Markup.button.callback('🔙 Назад', 'my_subscription')],
       ]),
     });
@@ -1034,7 +1029,7 @@ export class BotService {
 
     buttons.push([Markup.button.callback('🔙 Назад', 'my_subscription')]);
 
-    await this.replyOrEdit(ctx, '🔐 **Конфигурации VPN**\n\nВыберите ключ:', {
+    await this.replyOrEdit(ctx, '🔐 **Ключи для подключения VPN**\n\nВыберите ключ:', {
       parse_mode: 'Markdown',
       ...Markup.inlineKeyboard(buttons),
     });
@@ -1176,7 +1171,9 @@ export class BotService {
     const deposits = await this.depositService.findPending();
 
     if (deposits.length === 0) {
-      await this.replyOrEdit(ctx, '✅ Нет ожидающих пополнений.');
+      await this.replyOrEdit(ctx, '✅ Нет ожидающих пополнений.', {
+        ...Markup.inlineKeyboard([[Markup.button.callback('🔙 Назад', 'show_menu')]]),
+      });
       return;
     }
 
@@ -1252,7 +1249,7 @@ export class BotService {
     const provisioned = result !== null;
     const expiryStr = result ? this.formatMskDate(result.key.subscriptionExpiresAt!) : '';
     const vpnButton = Markup.inlineKeyboard([
-      [Markup.button.callback('🔐 Конфигурации VPN', 'vpn_config')],
+      [Markup.button.callback('🔐 Ключи для подключения VPN', 'vpn_config')],
       [Markup.button.callback('🔙 В меню', 'show_menu')],
     ]);
 

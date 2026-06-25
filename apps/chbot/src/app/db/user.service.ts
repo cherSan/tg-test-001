@@ -35,8 +35,10 @@ export class UserService {
     return adminIds.includes(telegramId);
   }
 
-  isAdminOrSupport(telegramId: number): boolean {
-    return this.isAdmin(telegramId);
+  async isAdminOrSupport(telegramId: number): Promise<boolean> {
+    if (this.isAdmin(telegramId)) return true;
+    const user = await this.findByTelegramId(telegramId);
+    return user?.role === 'support';
   }
 
   /** Get admin Telegram IDs from env */

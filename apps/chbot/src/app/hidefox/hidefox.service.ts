@@ -89,7 +89,9 @@ export class HideFoxService {
           this.lastAuthTime = Date.now();
           return true;
         }
-      } catch (_) {}
+      } catch (_) {
+        console.error(_);
+      }
     }
     return this.login();
   }

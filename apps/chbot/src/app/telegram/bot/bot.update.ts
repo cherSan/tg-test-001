@@ -38,6 +38,8 @@ interface SessionData {
     ticketId: number;
     action: 'reply' | 'close';
   };
+  giftShareText?: string;
+  extendKeyId?: number;
 }
 
 @Update()
@@ -377,17 +379,61 @@ export class BotUpdate {
   async onGiftSub(@Ctx() ctx: Context) {
     if (!this.checkActionSpam(ctx)) { await ctx.answerCbQuery().catch(() => {}); return; }
     await ctx.answerCbQuery();
-    await ctx.reply(
-      '🎁 **Подарить подписку**\n\n' +
-      'Вы можете подарить подписку другому пользователю.\n\n' +
-      '🚧 Раздел в разработке.',
-      {
-        parse_mode: 'Markdown',
-        ...Markup.inlineKeyboard([
-          [Markup.button.callback('🔙 Назад', 'my_subscription')],
-        ]),
-      },
-    );
+    await this.botService.showGiftSubscription(ctx);
+  }
+
+  @Action('my_gifts')
+  async onMyGifts(@Ctx() ctx: Context) {
+    if (!this.checkActionSpam(ctx)) { await ctx.answerCbQuery().catch(() => {}); return; }
+    await ctx.answerCbQuery();
+    await this.botService.showMyGifts(ctx);
+  }
+
+  @Action(/^giftplan_(\d+)$/)
+  async onGiftPlan(@Ctx() ctx: Context) {
+    if (!this.checkActionSpam(ctx)) { await ctx.answerCbQuery().catch(() => {}); return; }
+    await ctx.answerCbQuery();
+    const match = (ctx as any).match;
+    await this.botService.createGift(ctx, parseInt(match[1], 10));
+  }
+
+  @Action('redeem_gift')
+  async onRedeemGift(@Ctx() ctx: Context & { session: SessionData }) {
+    if (!this.checkActionSpam(ctx)) { await ctx.answerCbQuery().catch(() => {}); return; }
+    await ctx.answerCbQuery();
+    ctx.session.awaitingEditField = { userId: 0, field: 'gift_code' as any };
+    await ctx.reply('🎁 Введите **подарочный код**:', { parse_mode: 'Markdown', ...Markup.inlineKeyboard([[Markup.button.callback('❌ Отменить', 'cancel_action')]]) });
+  }
+
+  @Action(/^share_gift_(.+)$/)
+  async onShareGift(@Ctx() ctx: Context & { session: SessionData }) {
+    if (!this.checkActionSpam(ctx)) { await ctx.answerCbQuery().catch(() => {}); return; }
+    await ctx.answerCbQuery();
+    const text = ctx.session?.giftShareText || '🎁 Подарочная карточка HideFox VPN';
+    ctx.session.giftShareText = undefined;
+    await ctx.reply(text, { parse_mode: 'Markdown' });
+  }
+
+  @Action(/^gift_extend_(\d+)$/)
+  async onGiftExtendKey(@Ctx() ctx: Context & { session: SessionData }) {
+    if (!this.checkActionSpam(ctx)) { await ctx.answerCbQuery().catch(() => {}); return; }
+    await ctx.answerCbQuery();
+    const match = (ctx as any).match;
+    await this.botService.processGiftExtend(ctx, ctx.from!.id, parseInt(match[1], 10));
+  }
+
+  @Action('gift_extend')
+  async onGiftExtend(@Ctx() ctx: Context & { session: SessionData }) {
+    if (!this.checkActionSpam(ctx)) { await ctx.answerCbQuery().catch(() => {}); return; }
+    await ctx.answerCbQuery();
+    await this.botService.processGiftExtend(ctx, ctx.from!.id);
+  }
+
+  @Action('gift_new')
+  async onGiftNew(@Ctx() ctx: Context & { session: SessionData }) {
+    if (!this.checkActionSpam(ctx)) { await ctx.answerCbQuery().catch(() => {}); return; }
+    await ctx.answerCbQuery();
+    await this.botService.processGiftNew(ctx, ctx.from!.id);
   }
 
   // ─── Support tickets ──────────────────────────────────────
@@ -731,7 +777,7 @@ export class BotUpdate {
 
   /** Shared admin tickets list (no answerCbQuery) */
   private async showAdminTickets(ctx: Context) {
-    const isAdmin = ctx.from ? this.userService.isAdmin(ctx.from.id) : false;
+    const isAdmin = ctx.from ? (this.userService.isAdmin(ctx.from.id) || (await this.userService.findByTelegramId(ctx.from.id))?.role === 'admin') : false;
     if (!isAdmin) {
       const ok = await this.checkSupport(ctx);
       if (!ok) return;
@@ -838,7 +884,8 @@ export class BotUpdate {
     const stText = ticket.status === 'open' ? 'Открыт' : 'Закрыт';
 
     // Edit button only for admins (not support)
-    const isAdmin = ctx.from ? this.userService.isAdmin(ctx.from.id) : false;
+    const dbUser = ctx.from ? await this.userService.findByTelegramId(ctx.from.id) : null;
+    const isAdmin = ctx.from ? (this.userService.isAdmin(ctx.from.id) || dbUser?.role === 'admin') : false;
 
     const buttons: any[][] = [];
     if (isAdmin) {
@@ -2126,10 +2173,7 @@ export class BotUpdate {
       return;
     }
 
-    if (!this.userService.isAdmin(tgUser.id)) {
-      await ctx.reply('⛔ Эта команда доступна только администраторам.');
-      return;
-    }
+    if (!(await this.checkAdmin(ctx))) return;
 
     const users = await this.userService.findAll();
 
@@ -2359,6 +2403,13 @@ export class BotUpdate {
     }
 
     // ── Set referrer code ────────────────────────────────
+    if (field === 'gift_code') {
+      const code = text.trim().toUpperCase();
+      await this.botService.redeemGift(ctx, code, ctx.from!.id);
+      ctx.session.awaitingEditField = undefined;
+      return;
+    }
+
     if (field === 'referrer_code') {
       const code = text.trim().toUpperCase();
       const referrer = await this.userService.findByReferralCode(code);
@@ -2416,10 +2467,7 @@ export class BotUpdate {
       return;
     }
 
-    if (!this.userService.isAdmin(tgUser.id)) {
-      await ctx.reply('⛔ Эта команда доступна только администраторам.');
-      return;
-    }
+    if (!(await this.checkAdmin(ctx))) return;
 
     const match = (ctx as any).match;
     const targetTelegramId = parseInt(match[1], 10);

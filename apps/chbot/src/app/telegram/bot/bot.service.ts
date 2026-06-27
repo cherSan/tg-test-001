@@ -9,6 +9,7 @@ import { VpnKey } from '../../db/entities/vpn-key.entity';
 import { TicketService } from '../../db/ticket.service';
 import { Ticket } from '../../db/entities/ticket.entity';
 import { ReferralService } from '../../db/referral.service';
+import { GiftService } from '../../db/gift.service';
 import { HideFoxService } from '../../hidefox/hidefox.service';
 
 @Injectable()
@@ -25,6 +26,7 @@ export class BotService {
     private readonly vpnKeyService: VpnKeyService,
     private readonly ticketService: TicketService,
     private readonly referralService: ReferralService,
+    private readonly giftService: GiftService,
   ) {}
 
   /** Get referral statistics for a user */
@@ -675,6 +677,104 @@ export class BotService {
     await this.vpnKeyService.delete(key.id);
     this.logger.log(`Deleted Key${key.keyIndex} (peer=${key.peerId})`);
   }
+
+  async showGiftSubscription(ctx: Context) {
+    const tgUser = ctx.from!;
+    const dbUser = await this.userService.findByTelegramId(tgUser.id);
+    const balance = dbUser?.userBalanceUSDT ?? 0;
+    const plans = this.getSubscriptionPlans({ btcUsdt: 0, tonUsdt: 0 }).filter((p) => p.usdt > 0);
+    const plansText = plans.map((p) => p.label + ': **' + p.usdt + '** USDT').join('\n');
+    const planButtons: any[][] = plans.map((p) => [Markup.button.callback(p.label + ' — ' + p.usdt + ' USDT', `giftplan_${p.hours}`)]);
+    planButtons.push([Markup.button.callback('📋 Мои подарки', 'my_gifts')]);
+    planButtons.push([Markup.button.callback('🔙 Назад', 'my_subscription')]);
+    await this.replyOrEdit(ctx,
+      '🎁 **Подарить подписку**\n\n' +
+      '💰 Ваш баланс: **' + balance.toFixed(2) + '** USDT\n\n' +
+      'Выберите тариф для подарка:\n' + plansText + '\n\n' +
+      'Пробный период недоступен для подарка.',
+      { parse_mode: 'Markdown', ...Markup.inlineKeyboard(planButtons) },
+    );
+  }
+
+  async showMyGifts(ctx: Context) {
+    const tgUser = ctx.from!;
+    const dbUser = await this.userService.findByTelegramId(tgUser.id);
+    if (!dbUser) return;
+    const gifts = await this.giftService.findByFromUserId(dbUser.id);
+    if (gifts.length === 0) {
+      await this.replyOrEdit(ctx, '📭 У вас нет созданных подарков.', {
+        ...Markup.inlineKeyboard([[Markup.button.callback('🔙 Назад', 'gift_sub')]]),
+      });
+      return;
+    }
+    for (const g of gifts) {
+      const statusIcon = g.status === 'active' ? '✅' : g.status === 'redeemed' ? '🎁' : '⏰';
+      const codeDisplay = g.status === 'active' ? `\`${g.code}\`` : `~${g.code}~`;
+      const planText = `${g.planHours} ч.`;
+      const redeemedInfo = g.redeemedBy ? ` (использован ID:${g.redeemedBy})` : '';
+      const expiredInfo = g.status === 'expired' ? ' (истёк)' : '';
+      await ctx.reply(
+        `${statusIcon} ${codeDisplay} — **${planText}**${redeemedInfo}${expiredInfo}\n📅 Создан: ${g.createdAt.toISOString().replace('T', ' ').slice(0, 19)}`,
+        { parse_mode: 'Markdown' },
+      );
+    }
+    await ctx.reply('Выберите действие:', {
+      ...Markup.inlineKeyboard([[Markup.button.callback('🔙 Назад', 'gift_sub')]]),
+    });
+  }
+
+  async createGift(ctx: Context, planHours: number): Promise<boolean> {
+    const tgUser = ctx.from!;
+    const dbUser = await this.userService.findByTelegramId(tgUser.id);
+    if (!dbUser) { await ctx.reply('❌ Пользователь не найден.'); return false; }
+    const plans = this.getSubscriptionPlans({ btcUsdt: 0, tonUsdt: 0 });
+    const plan = plans.find((p) => p.hours === planHours);
+    if (!plan || plan.usdt <= 0) { await ctx.reply('❌ Тариф не найден.'); return false; }
+    if ((dbUser.userBalanceUSDT ?? 0) < plan.usdt) {
+      await ctx.reply('❌ Недостаточно средств.', { parse_mode: 'Markdown' });
+      return false;
+    }
+    const newBalance = (dbUser.userBalanceUSDT ?? 0) - plan.usdt;
+    await this.userService.update(dbUser.id, { userBalanceUSDT: newBalance });
+    const gift = await this.giftService.create(dbUser.id, planHours);
+    const refLink = dbUser.referralCode ? `t.me/Amnbot3bot?start=ref${dbUser.referralCode}` : '';
+    const shareText = `🎁 **Подарочная карточка HideFox VPN**\n\nЯ дарю тебе подписку на **${planHours}** ч.!\n\n${refLink ? `🔗 Перейди по ссылке: ${refLink}\n` : ''}🎟 После регистрации введи код: \`${gift.code}\`\n\nПодписка активируется автоматически!`;
+
+    (ctx as any).session = (ctx as any).session || {};
+    (ctx as any).session.giftShareText = shareText;
+
+    await ctx.reply(
+      '✅ **Подарок создан!**\n\n' +
+      '🎟 Код: `' + gift.code + '`\n' +
+      'Отправьте этот код другу. Когда он введёт его — ему будет создан ключ на **' + planHours + '** ч.\n\n' +
+      '⏳ Срок действия: ' + (process.env.GIFT_CODE_VALIDITY_DAYS || '30') + ' дн.',
+      {
+        parse_mode: 'Markdown',
+        ...Markup.inlineKeyboard([
+          [Markup.button.callback('📋 Создать подарочную карточку', 'share_gift_' + gift.code)],
+          [Markup.button.callback('🔙 Назад', 'my_subscription')],
+        ]),
+      },
+    );
+    return true;
+  }
+
+  async redeemGift(ctx: Context, code: string, userId: number): Promise<string> {
+    const gift = await this.giftService.redeem(code, userId);
+    if (!gift) return '❌ Код недействителен, уже использован или истёк.';
+    const user = await this.userService.findByTelegramId(userId);
+    if (!user) return '❌ Пользователь не найден.';
+    const result = await this.provisionKey(user, gift.planHours);
+    if (!result) return '❌ Не удалось создать ключ.';
+    await ctx.reply(
+      '🎁 **Поздравляем!** Вы получили подарок!\n' +
+      '📅 **' + gift.planHours + '** ч. HideFox VPN\n' +
+      '🔑 Ключ **Key' + result.key.keyIndex + '** создан, подписка до **' + this.formatMskDate(result.key.subscriptionExpiresAt!) + '**',
+      { parse_mode: 'Markdown', ...Markup.inlineKeyboard([[Markup.button.callback('🔐 Конфигурации VPN', 'vpn_config')]]) },
+    );
+    return 'OK';
+  }
+
 
   /** Get all keys for a user */
   async getUserKeys(userId: number): Promise<VpnKey[]> {

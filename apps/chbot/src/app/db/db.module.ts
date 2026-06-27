@@ -18,7 +18,7 @@ import { GiftService } from './gift.service';
     TypeOrmModule.forRootAsync({
       useFactory: () => ({
         type: 'sqljs',
-        location: process.env.DB_PATH || 'data/chbot.db',
+        location: process.env.DB_PATH,
         autoSave: true,
         autoLoadEntities: true,
         synchronize: true, // TODO: disable in production

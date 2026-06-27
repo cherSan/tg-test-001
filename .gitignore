@@ -47,3 +47,4 @@ Thumbs.db
 test-output
 /.env
 /apps/chbot/tsconfig.tsbuildinfo
+/data/chbot.db

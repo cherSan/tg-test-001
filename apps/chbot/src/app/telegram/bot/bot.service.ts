@@ -696,6 +696,14 @@ export class BotService {
     );
   }
 
+  async getGiftCardText(code: string, telegramId: number): Promise<string> {
+    const dbUser = await this.userService.findByTelegramId(telegramId);
+    const refLink = dbUser?.referralCode ? `t.me/Amnbot3bot?start=ref${dbUser.referralCode}` : '';
+    const gift = await this.giftService.findByCode(code);
+    const planHours = gift?.planHours || '?';
+    return `🎁 **Подарочная карточка HideFox VPN**\n\nЯ дарю тебе подписку на **${planHours}** ч.!\n\n${refLink ? `🔗 Перейди по ссылке: ${refLink}\n` : ''}🎟 После регистрации введи код: \`${code}\`\n\nПодписка активируется автоматически!`;
+  }
+
   async showMyGifts(ctx: Context) {
     const tgUser = ctx.from!;
     const dbUser = await this.userService.findByTelegramId(tgUser.id);
@@ -707,15 +715,29 @@ export class BotService {
       });
       return;
     }
+    const validityDays = parseInt(process.env.GIFT_CODE_VALIDITY_DAYS || '30', 10);
     for (const g of gifts) {
-      const statusIcon = g.status === 'active' ? '✅' : g.status === 'redeemed' ? '🎁' : '⏰';
+      const statusIcon = g.status === 'active' ? '✅' : g.status === 'redeemed' ? '🎁' : '❌';
       const codeDisplay = g.status === 'active' ? `\`${g.code}\`` : `~${g.code}~`;
       const planText = `${g.planHours} ч.`;
       const redeemedInfo = g.redeemedBy ? ` (использован ID:${g.redeemedBy})` : '';
-      const expiredInfo = g.status === 'expired' ? ' (истёк)' : '';
+      let extraInfo = '';
+      if (g.status === 'active') {
+        const expiresAt = new Date(g.createdAt.getTime() + validityDays * 86400_000);
+        const remainingMs = expiresAt.getTime() - Date.now();
+        const remainingDays = Math.max(0, Math.ceil(remainingMs / 86400_000));
+        extraInfo = `\n⏳ Осталось: ${remainingDays} дн.`;
+      } else if (g.status === 'expired') {
+        extraInfo = ' (истёк)';
+      }
+      const buttons: any[][] = [];
+      if (g.status === 'active') {
+        const cardText = await this.getGiftCardText(g.code, tgUser!.id);
+        buttons.push([Markup.button.switchToChat('📤 Поделиться', cardText)]);
+      }
       await ctx.reply(
-        `${statusIcon} ${codeDisplay} — **${planText}**${redeemedInfo}${expiredInfo}\n📅 Создан: ${g.createdAt.toISOString().replace('T', ' ').slice(0, 19)}`,
-        { parse_mode: 'Markdown' },
+        `${statusIcon} ${codeDisplay} — **${planText}**${redeemedInfo}${extraInfo}\n📅 Создан: ${g.createdAt.toISOString().replace('T', ' ').slice(0, 19)}`,
+        { parse_mode: 'Markdown', ...Markup.inlineKeyboard(buttons) },
       );
     }
     await ctx.reply('Выберите действие:', {
@@ -751,7 +773,7 @@ export class BotService {
       {
         parse_mode: 'Markdown',
         ...Markup.inlineKeyboard([
-          [Markup.button.callback('📋 Создать подарочную карточку', 'share_gift_' + gift.code)],
+          [Markup.button.switchToChat('📤 Отправить другу', shareText)],
           [Markup.button.callback('🔙 Назад', 'my_subscription')],
         ]),
       },

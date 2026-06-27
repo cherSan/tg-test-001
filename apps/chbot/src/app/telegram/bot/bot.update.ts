@@ -409,8 +409,8 @@ export class BotUpdate {
   async onShareGift(@Ctx() ctx: Context & { session: SessionData }) {
     if (!this.checkActionSpam(ctx)) { await ctx.answerCbQuery().catch(() => {}); return; }
     await ctx.answerCbQuery();
-    const text = ctx.session?.giftShareText || '🎁 Подарочная карточка HideFox VPN';
-    ctx.session.giftShareText = undefined;
+    const code = (ctx as any).match[1];
+    const text = await this.botService.getGiftCardText(code, ctx.from!.id);
     await ctx.reply(text, { parse_mode: 'Markdown' });
   }
 
@@ -955,7 +955,7 @@ export class BotUpdate {
     }
 
     const buttons: any[][] = [
-      [Markup.button.callback('🔗 Поделиться ссылкой', 'share_ref')],
+      [Markup.button.switchToChat('🔗 Поделиться ссылкой', `🎁 Приглашаю в HideFox VPN!\n\n• Пробный период — 24 часа\n• Оплата криптовалютой\n• Свой ключ для каждого устройства\n\nПереходи: t.me/Amnbot3bot?start=ref${dbUser?.referralCode || ''}`)],
     ];
     if (!dbUser.referrerId) {
       const windowH = parseInt(process.env.REFERRAL_WINDOW_HOURS || '72', 10);
@@ -1418,7 +1418,7 @@ export class BotUpdate {
       'sendDocument',
       chatId,
       Buffer.from(config, 'utf-8'),
-      `amnezia_key${key.keyIndex}.conf`,
+      `A1_key${key.keyIndex}.conf`,
       `🔐 Key${key.keyIndex} — конфигурация HideFox VPN`,
     );
   }
@@ -1450,7 +1450,7 @@ export class BotUpdate {
       'sendPhoto',
       chatId,
       qrBuffer,
-      `amnezia_key${key.keyIndex}.png`,
+      `A1_key${key.keyIndex}.png`,
       `📱 Key${key.keyIndex} — отсканируйте QR-код`,
     );
   }
